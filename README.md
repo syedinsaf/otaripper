@@ -4,7 +4,6 @@
 } -->
 
 <div align="center">
-
 # otaripper
 
 **`otaripper` helps you extract partitions from Android OTA files.** <br />
@@ -42,8 +41,7 @@ curl -sS https://raw.githubusercontent.com/syedinsaf/otaripper/main/install.sh |
 
 ### Windows
 
-Download the pre-built binary from the [Releases] page. Extract it and run the
-`otadump.exe` file.
+Download the pre-built binary from the [Releases] page. Extract it and run the `otaripper.exe` file.
 
 ## Usage
 
@@ -59,14 +57,22 @@ otaripper payload.bin
 ./otaripper ota.bin (on Linux)
 
 ```
+## To extract your desired Partitions add " --partitions" and then your desired ".img"
 
+```sh
+# For example, if you want to extract just the boot image, you can do this:
+./otaripper  payload.bin --partitions boot
+
+# If you want multiple desired images, you can separate them by a ","
+./otaripper  payload.bin --partitions boot,init_boot
+```
 ## Contributors
 
 - [Syed Insaf][syedinsaf]
 
 [syedinsaf]: https://github.com/syedinsaf
 [benchmarks]: contrib/benchmarks.svg
-[demo]: contrib/demo.gif
+[demo]: contrib/demo.mkv
 [payload_dumper-incremental-ota]: https://github.com/vm03/payload_dumper/issues/53
 [releases]: https://github.com/syedinsaf/otaripper/releases
 [ssut/payload-dumper-go]: https://github.com/ssut/payload-dumper-go
