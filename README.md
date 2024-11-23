@@ -5,14 +5,12 @@
 
 <div align="center">
 
-# otadump
+# otaripper
 
-[![crates.io][crates.io-badge]][crates.io]
+**`otaripper` helps you extract partitions from Android OTA files.** <br />
+Partitions can be individually flashed to your device using `fastboot flash`.
 
-**`otadump` helps you extract partitions from Android OTA files.** <br />
-Partitions can be individually flashed to your device using `fastboot`.
-
-Compared to other tools, `otadump` is significantly faster and handles file
+Compared to other tools, `otaripper` is significantly faster and handles file
 verification - no fear of a bad OTA file bricking your device.
 
 ![Demo][demo]
@@ -21,7 +19,7 @@ verification - no fear of a bad OTA file bricking your device.
 
 ## Features
 
-|                              | [crazystylus/otadump] | [ssut/payload-dumper-go] | [vm03/payload_dumper]                     |
+|                              | [syedinsaf/otaripper] | [ssut/payload-dumper-go] | [vm03/payload_dumper]                     |
 | ---------------------------- | --------------------- | ------------------------ | ----------------------------------------- |
 | Input file verification      | ✔                     | ✔                        |                                           |
 | Output file verification     | ✔                     |                          |                                           |
@@ -30,21 +28,7 @@ verification - no fear of a bad OTA file bricking your device.
 | Runs directly on .zip files  | ✔                     | ✔                        |                                           |
 | Incremental OTA support      |                       |                          | [Partial][payload_dumper-incremental-ota] |
 
-## Benchmarks
 
-Comparing the time taken to extract all partitions from a few sample files
-(lower is better):
-
-![Benchmarks][benchmarks]
-
-**Note:** `otadump` was run with args `--no-verify -c 12` and `payload-dumper-go` was run with args `-c 12`
-
-System specifications:
-
-- Processor: AMD Ryzen 5 5600X (12) @ 3.700GHz
-- RAM: 16 GiB
-- OS: Pop!_OS 22.04 / Linux 6.0.6
-- SSD: Samsung 970 EVO 250GB
 
 ## Installation
 
@@ -76,10 +60,13 @@ Run the following command in your terminal:
 
 ```sh
 # Run directly on .zip file.
-otadump ota.zip
+otaripper ota.zip (on Windows)
+./otaripper ota.zip (on Linux)
 
 # Run on payload.bin file.
-otadump payload.bin
+otaripper payload.bin
+./otaripper ota.bin (on Linux)
+
 ```
 
 ## Contributors

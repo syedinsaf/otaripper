@@ -1,7 +1,7 @@
 #!/bin/sh
 # shellcheck shell=dash
 
-# The official otadump installer.
+# The official otaripper installer.
 #
 # It runs on Unix shells like {a,ba,da,k,z}sh. It uses the common `local`
 # extension. Note: Most shells limit `local` to 1 var per line, contra bash.
@@ -27,8 +27,8 @@ main() {
     _tmp_dir="$(mktemp -d)" || err "mktemp: could not create temporary directory"
     cd "$_tmp_dir" || err "cd: failed to enter directory: $_tmp_dir"
 
-    # Download and extract otadump.
-    ensure download_otadump "$_arch"
+    # Download and extract otaripper.
+    ensure download_otaripper "$_arch"
     local _package="$RETVAL"
     assert_nz "$_package" "package"
     echo "Downloaded package: $_package"
@@ -50,22 +50,22 @@ main() {
     local _bin_dir="$HOME/.local/bin"
     local _bin_name
     case "$_arch" in
-    *windows*) _bin_name="otadump.exe" ;;
-    *) _bin_name="otadump" ;;
+    *windows*) _bin_name="otaripper.exe" ;;
+    *) _bin_name="otaripper" ;;
     esac
     ensure mkdir -p "$_bin_dir"
     ensure cp "$_bin_name" "$_bin_dir"
-    echo "Installed otadump to $_bin_dir"
+    echo "Installed otaripper to $_bin_dir"
 
     # Print success message and check $PATH.
     echo ""
-    echo "otadump is installed!"
+    echo "otaripper is installed!"
     if ! echo ":$PATH:" | grep -Fq ":$_bin_dir:"; then
-        echo "NOTE: $_bin_dir is not on your \$PATH. otadump will not work unless it is added to \$PATH."
+        echo "NOTE: $_bin_dir is not on your \$PATH. otaripper will not work unless it is added to \$PATH."
     fi
 }
 
-download_otadump() {
+download_otaripper() {
     local _arch="$1"
 
     if check_cmd curl; then
@@ -77,7 +77,7 @@ download_otadump() {
     fi
     need_cmd grep
 
-    local _releases_url="https://api.github.com/repos/crazystylus/otadump/releases/latest"
+    local _releases_url="https://api.github.com/repos/syedinsaf/otaripper/releases/latest"
     local _releases
     case "$_dld" in
     curl) _releases="$(curl -sL "$_releases_url")" ||
@@ -86,11 +86,11 @@ download_otadump() {
         err "wget: failed to download $_releases_url" ;;
     esac
     (echo "$_releases" | grep -q 'API rate limit exceeded') &&
-        err "you have exceeded GitHub's API rate limit. Please try again later, or use a different installation method: https://github.com/crazystylus/otadump/#installation"
+        err "you have exceeded GitHub's API rate limit. Please try again later, or use a different installation method: https://github.com/syedinsaf/otaripper/#installation"
 
     local _package_url
     _package_url="$(echo "$_releases" | grep "browser_download_url" | cut -d '"' -f 4 | grep "$_arch")" ||
-        err "otadump has not yet been packaged for your architecture ($_arch), please file an issue: https://github.com/crazystylus/otadump/issues"
+        err "otaripper has not yet been packaged for your architecture ($_arch), please file an issue: https://github.com/syedinsaf/otaripper/issues"
 
     local _ext
     case "$_package_url" in
@@ -99,7 +99,7 @@ download_otadump() {
     *) err "unsupported package format: $_package_url" ;;
     esac
 
-    local _package="otadump.$_ext"
+    local _package="otaripper.$_ext"
     case "$_dld" in
     curl) _releases="$(curl -sLo "$_package" "$_package_url")" || err "curl: failed to download $_package_url" ;;
     wget) _releases="$(wget -qO "$_package" "$_package_url")" || err "wget: failed to download $_package_url" ;;
