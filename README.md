@@ -71,8 +71,7 @@ otaripper payload.bin
 - [Syed Insaf][syedinsaf]
 
 [syedinsaf]: https://github.com/syedinsaf
-[benchmarks]: contrib/benchmarks.svg
-[demo]: contrib/demo.gif
+[demo]: contrib/demo.mp4
 [payload_dumper-incremental-ota]: https://github.com/vm03/payload_dumper/issues/53
 [releases]: https://github.com/syedinsaf/otaripper/releases
 [ssut/payload-dumper-go]: https://github.com/ssut/payload-dumper-go
