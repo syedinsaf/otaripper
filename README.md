@@ -72,7 +72,7 @@ otaripper payload.bin
 
 [syedinsaf]: https://github.com/syedinsaf
 [benchmarks]: contrib/benchmarks.svg
-[demo]: contrib/demo.mkv
+[demo]: contrib/demo.gif
 [payload_dumper-incremental-ota]: https://github.com/vm03/payload_dumper/issues/53
 [releases]: https://github.com/syedinsaf/otaripper/releases
 [ssut/payload-dumper-go]: https://github.com/ssut/payload-dumper-go
