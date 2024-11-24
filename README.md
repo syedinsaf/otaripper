@@ -12,8 +12,6 @@ Partitions can be individually flashed to your device using `fastboot flash`.
 Compared to other tools, `otaripper` is significantly faster and handles file
 verification - no fear of a bad OTA file bricking your device.
 
-![Demo][demo]
-
 </div>
 
 ## Features
