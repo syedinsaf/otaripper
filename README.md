@@ -4,6 +4,7 @@
 } -->
 
 <div align="center">
+
 # otaripper
 
 **`otaripper` helps you extract partitions from Android OTA files.** <br />
@@ -39,7 +40,9 @@ curl -sS https://raw.githubusercontent.com/syedinsaf/otaripper/main/install.sh |
 
 ### Windows
 
-Download the pre-built binary from the [Releases] page. Extract it and run the `otaripper.exe` file.
+1. Download the pre-built binary from the [Releases] page. 
+2. Extract it. 
+3. Have the payload.bin or the ota.zip in the same extracted folder as otaripper.exe. 
 
 ## Usage
 
