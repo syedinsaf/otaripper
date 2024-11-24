@@ -55,7 +55,7 @@ otaripper ota.zip (on Windows)
 ./otaripper ota.zip (on Linux)
 
 # Run on payload.bin file.
-otaripper payload.bin
+otaripper payload.bin (on Windows)
 ./otaripper ota.bin (on Linux)
 
 ```
