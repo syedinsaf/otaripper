@@ -57,7 +57,7 @@ otaripper payload.bin
 ./otaripper ota.bin (on Linux)
 
 ```
-## To extract your desired Partitions add " --partitions" and then your desired ".img"
+## To extract your desired Partitions add " --partitions" and then your desired parition.
 
 ```sh
 # For example, if you want to extract just the boot image, you can do this:
