@@ -37,6 +37,7 @@ Install a pre-built binary:
 ```sh
 curl -sS https://raw.githubusercontent.com/syedinsaf/otaripper/main/install.sh | bash
 ```
+Or download the pre-built binary from the [Releases] page. 
 
 ### Windows
 
