@@ -73,6 +73,6 @@ otaripper payload.bin
 [syedinsaf]: https://github.com/syedinsaf
 [payload_dumper-incremental-ota]: https://github.com/vm03/payload_dumper/issues/53
 [releases]: https://github.com/syedinsaf/otaripper/releases
-[syedinsaf/otaripper] : https://github.com/syedinsaf/otaripper
+[syedinsaf/otaripper]: https://github.com/syedinsaf/otaripper
 [ssut/payload-dumper-go]: https://github.com/ssut/payload-dumper-go
 [vm03/payload_dumper]: https://github.com/vm03/payload_dumper
