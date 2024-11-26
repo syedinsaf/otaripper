@@ -56,10 +56,10 @@ otaripper ota.zip (on Windows)
 
 # Run on payload.bin file.
 otaripper payload.bin (on Windows)
-./otaripper payload.bin (on Linux)
+./otaripper ota.bin (on Linux)
 
 ```
-## To extract your desired Partitions add "--partitions" and then your desired Partitions.
+## To extract your desired Partitions add "--partitions" and then your desired parition.
 
 ```sh
 # For example, if you want to extract just the boot image, you can do this:

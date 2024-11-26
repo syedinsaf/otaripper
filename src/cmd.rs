@@ -57,12 +57,12 @@ https://github.com/crazystylus/otadump
 )]
 pub struct Cmd {
     /// OTA file, either a .zip file or a payload.bin.
-    #[clap(value_hint = ValueHint::FilePath, value_name = "PATH")]
+    #[clap(value_hint = ValueHint::FilePath, value_name = "PATH",short = 'p')]
     payload: PathBuf,
 
     /// List partitions instead of extracting them
     #[clap(
-        conflicts_with = "concurrency",
+        conflicts_with = "threads",
         conflicts_with = "output_dir",
         conflicts_with = "partitions",
         conflicts_with = "no_verify",
@@ -73,7 +73,7 @@ pub struct Cmd {
 
     /// Number of threads to use during extraction
     #[clap(long, short, value_name = "N")]
-    concurrency: Option<usize>,
+    threads: Option<usize>,
 
     /// Set output directory
     #[clap(long, short, value_hint = ValueHint::DirPath, value_name = "PATH")]
@@ -384,9 +384,9 @@ impl Cmd {
     }
 
     fn get_threadpool(&self) -> Result<ThreadPool> {
-        let concurrency = self.concurrency.unwrap_or(0);
+        let threads = self.threads.unwrap_or(0);
         ThreadPoolBuilder::new()
-            .num_threads(concurrency)
+            .num_threads(threads)
             .build()
             .context("unable to start threadpool")
     } 
