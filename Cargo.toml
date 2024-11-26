@@ -1,12 +1,12 @@
 [package]
-authors = ["Syed Insaf <syedinsaf68@gmail.com>"]
+authors = ["Syed Insaf <syedinsaf@proton.me>"]
 description = "Extract partitions from Android OTA files"
 categories = ["command-line-utilities"]
 edition = "2021"
 keywords = ["android", "cli", "terminal"]
 license = "MIT"
 name = "otaripper"
-repository = "https://github.com/syedinsaf/otarip"
+repository = "https://github.com/syedinsaf/otaripper"
 readme = "README.md"
 rust-version = "1.82.0"
 version = "1.1.0"

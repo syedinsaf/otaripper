@@ -5,7 +5,7 @@ use nom_derive::{NomBE, Parse};
 /// a specific version. It can be a full payload which can update from any
 /// version, or a delta payload which can only update from a specific version.
 #[derive(Debug, NomBE)]
-#[warn(dead_code)]
+#[allow(dead_code)]
 pub struct Payload<'a> {
     /// Should be "CrAU".
     #[nom(Tag = r#"b"CrAU""#)]

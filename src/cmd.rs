@@ -8,24 +8,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::convert::TryFrom;
 use std::{env, slice};
-use xz2::read::XzDecoder;
-
-
-use anyhow::{bail, ensure, Context, Result};
 use bzip2::read::BzDecoder;
 use chrono::Utc;
 use clap::{Parser, ValueHint};
 use console::Style;
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressFinish, ProgressStyle};
-use lzma_rs::lzma_decompress;
 use memmap2::{Mmap, MmapMut};
-use prost::{Message, UnknownEnumValue};
+use prost::Message;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use sha2::{Digest, Sha256,};
 use sync_unsafe_cell::SyncUnsafeCell;
 use zip::result::ZipError;
 use zip::ZipArchive;
-use hex;
+use anyhow::{bail, ensure, Context, Result};
 
 
 use crate::chromeos_update_engine::install_operation::Type;
@@ -36,7 +31,7 @@ const HELP_TEMPLATE: &str = color_print::cstr!(
     "\
 {before-help}<bold><underline>{name} {version}</underline></bold>
 {author}
-https://github.com/crazystylus/otadump
+https://github.com/syedinsaf/otadump
 
 {about}
 
@@ -57,8 +52,8 @@ https://github.com/crazystylus/otadump
 )]
 pub struct Cmd {
     /// OTA file, either a .zip file or a payload.bin.
-    #[clap(value_hint = ValueHint::FilePath, value_name = "PATH",short = 'p')]
-    payload: PathBuf,
+    #[clap(short = 'p', long = "path", value_hint = ValueHint::FilePath, value_name = "PATH")]
+    payload: Option<PathBuf>,
 
     /// List partitions instead of extracting them
     #[clap(
@@ -72,7 +67,7 @@ pub struct Cmd {
     list: bool,
 
     /// Number of threads to use during extraction
-    #[clap(long, short, value_name = "N")]
+    #[clap(long, short, value_name = "NUMBER")]
     threads: Option<usize>,
 
     /// Set output directory
@@ -86,11 +81,21 @@ pub struct Cmd {
     /// Skip file verification (dangerous!)
     #[clap(long)]
     no_verify: bool,
+
+    /// Positional argument for the payload file
+    #[clap(value_hint = ValueHint::FilePath)]
+    #[clap(index = 1, value_name = "PATH")]
+    positional_payload: Option<PathBuf>,
 }
 
 impl Cmd {
     pub fn run(&self) -> Result<()> {
-        let payload = self.open_payload_file()?;
+        // Determine the payload path
+        let payload_path = self.payload.clone().or_else(|| self.positional_payload.clone())
+            .ok_or_else(|| anyhow::anyhow!("No payload file specified. Please provide a payload file using -p or as a positional argument."))?;
+
+        // Proceed with the rest of the method using payload_path
+        let payload = self.open_payload_file(&payload_path)?;
         let payload = &Payload::parse(&payload)?;
 
         let mut manifest =
@@ -249,8 +254,7 @@ impl Cmd {
         Ok(())
     }
 
-    fn open_payload_file(&self) -> Result<Mmap> {
-        let path = &self.payload;
+    fn open_payload_file(&self, path: &Path) -> Result<Mmap> {
         let file = File::open(path)
             .with_context(|| format!("unable to open file for reading: {path:?}"))?;
 
