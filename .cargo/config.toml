@@ -1,0 +1,29 @@
+# This configuration targets a CPU architecture that supports AVX and AVX2.
+# AVX512 is allowed but not required - runtime detection will choose the best available.
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+    "-C", "target-cpu=haswell",
+    "-C", "target-feature=+avx512f,+avx512bw"
+]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = [
+    "-C", "target-cpu=haswell",
+    "-C", "target-feature=+avx512f,+avx512bw",
+    "-C", "target-feature=+crt-static"
+]
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-cpu=haswell",
+    "-C", "target-feature=+avx512f,+avx512bw"
+]
+
+[target.x86_64-pc-windows-gnu]
+rustflags = [
+    "-C", "target-cpu=haswell",
+    "-C", "target-feature=+avx512f,+avx512bw",
+    "-C", "target-feature=+crt-static"
+]
+# For other targets, we don't need to specify CPU features
+# Note: AVX512 support is enabled but runtime detection will choose the best available instruction set

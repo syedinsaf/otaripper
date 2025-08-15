@@ -1,2 +1,10 @@
 
 /.idea
+bench_avx512.exe
+bench_avx512.pdb
+bench_avx512.rs
+src/protos/chromeos_update_engine/update_metadata.proto
+tests/folder_opening_test.rs
+tests/folder_size_test.rs
+tests/simd_test.rs
+src/protos/chromeos_update_engine/update_metadata.proto

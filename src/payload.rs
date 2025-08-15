@@ -39,10 +39,14 @@ pub struct Payload<'a> {
 
 impl<'a> Payload<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
-        // TODO: this outputs the entire bytes of the file in the event of a
-        // parser error. Use nom's VerboseError here.
-        let (_, payload): (_, Payload) = Parse::parse(bytes)
-            .map_err(|e| anyhow!(e.to_string()).context("failed to parse payload"))?;
-        Ok(payload)
+        // Parse the payload using the default error type
+        match Parse::parse(bytes) {
+            Ok((_, payload)) => Ok(payload),
+            Err(e) => {
+                // Provide a more descriptive error message
+                Err(anyhow!("Failed to parse payload: {}", e)
+                    .context("The payload file format is invalid or corrupted"))
+            }
+        }
     }
 }
