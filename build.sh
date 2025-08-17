@@ -7,15 +7,15 @@ echo "Building otaripper..."
 # Detect the platform
 if [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "darwin"* ]]; then
     echo "Detected Unix-like system (Linux/macOS)"
-    echo "Building with assembly optimizations for SHA2..."
-    cargo build --release --features asm-sha2
+    echo "Building with maximum performance optimizations..."
+    cargo build --release --features "asm-sha2,fast-compression,high-performance"
 elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]]; then
     echo "Detected Windows (MSYS/Cygwin)"
-    echo "Building without assembly optimizations for compatibility..."
-    cargo build --release
+    echo "Building with Windows-optimized features..."
+    cargo build --release --features "asm-sha2,fast-compression,high-performance,windows-optimized"
 else
-    echo "Unknown platform, building with default features..."
-    cargo build --release
+    echo "Unknown platform, building with default optimizations..."
+    cargo build --release --features "asm-sha2,fast-compression"
 fi
 
 echo "Build completed!"
