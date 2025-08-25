@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use nom_derive::{NomBE, Parse};
 
 /// Update file format: contains all the operations needed to update a system to
@@ -28,7 +28,10 @@ pub struct Payload<'a> {
     /// The signature of the metadata (from the beginning of the payload up to
     /// this location, not including the signature itself). This is a serialized
     /// [`Signatures`] message.
-    #[nom(If = "metadata_signature_size.is_some()", Take = "metadata_signature_size.unwrap()")]
+    #[nom(
+        If = "metadata_signature_size.is_some()",
+        Take = "metadata_signature_size.unwrap()"
+    )]
     metadata_signature: Option<&'a [u8]>,
 
     /// Data blobs for files, no specific format. The specific offset and length
@@ -39,10 +42,14 @@ pub struct Payload<'a> {
 
 impl<'a> Payload<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
-        // TODO: this outputs the entire bytes of the file in the event of a
-        // parser error. Use nom's VerboseError here.
-        let (_, payload): (_, Payload) = Parse::parse(bytes)
-            .map_err(|e| anyhow!(e.to_string()).context("failed to parse payload"))?;
-        Ok(payload)
+        // Parse the payload using the default error type
+        match Parse::parse(bytes) {
+            Ok((_, payload)) => Ok(payload),
+            Err(e) => {
+                // Provide a more descriptive error message
+                Err(anyhow!("Failed to parse payload: {}", e)
+                    .context("The payload file format is invalid or corrupted"))
+            }
+        }
     }
 }

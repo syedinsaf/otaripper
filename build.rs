@@ -4,7 +4,7 @@ fn main() {
         &["src/protos/chromeos_update_engine/update_metadata.proto"],
         &[] as &[&str],
     )
-        .expect("error compiling protobuf files");
+    .expect("error compiling protobuf files");
 
     // Windows-specific configuration
     #[cfg(target_os = "windows")]

@@ -1,4 +1,3 @@
-// Source: https://android.googlesource.com/platform/system/update_engine/+/HEAD/update_metadata.proto
 //
 // Copyright (C) 2010 The Android Open Source Project
 //
@@ -272,6 +271,9 @@ message PartitionUpdate {
   // as a hint. If set to 0, libsnapshot should use alternative
   // methods for estimating size.
   optional uint64 estimate_cow_size = 19;
+  // Information about the cow used by Cow Writer to specify
+  // number of cow operations to be written
+  optional uint64 estimate_op_count_max = 20;
 }
 message DynamicPartitionGroup {
   // Name of the group.
@@ -314,6 +316,9 @@ message DynamicPartitionMetadata {
   optional uint32 cow_version = 5;
   // A collection of knobs to tune Virtual AB Compression
   optional VABCFeatureSet vabc_feature_set = 6;
+  // Max bytes to be compressed at once during ota. Options: 4k, 8k, 16k, 32k,
+  // 64k, 128k
+  optional uint64 compression_factor = 7;
 }
 // Definition has been duplicated from
 // $ANDROID_BUILD_TOP/build/tools/releasetools/ota_metadata.proto. Keep in sync.
@@ -360,12 +365,11 @@ message DeltaArchiveManifest {
   // Metadata related to all dynamic partitions.
   optional DynamicPartitionMetadata dynamic_partition_metadata = 15;
   // If the payload only updates a subset of partitions on the device.
-  // optional bool partial_update = 16;
+  optional bool partial_update = 16;
   // Information on compressed APEX to figure out how much space is required for
   // their decompression
-  // repeated ApexInfo apex_info = 17;
+  repeated ApexInfo apex_info = 17;
   // Security patch level of the device, usually in the format of
   // yyyy-mm-dd
-  // optional string security_patch_level = 18;
-  reserved 16 to 18;
+  optional string security_patch_level = 18;
 }

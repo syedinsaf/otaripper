@@ -1,38 +1,40 @@
 [package]
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
-description = "Extract partitions from Android OTA files"
+description = "Extract partitions from Android OTA zip and payload bin"
 categories = ["command-line-utilities"]
-edition = "2021"
+edition = "2024"
 keywords = ["android", "cli", "terminal"]
 license = "MIT"
 name = "otaripper"
 repository = "https://github.com/syedinsaf/otaripper"
 readme = "README.md"
-rust-version = "1.82.0"
-version = "1.1.0"
+rust-version = "1.89.0"
+version = "1.2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.93"
-bzip2 = "0.4.4"
-chrono = "0.4.38"
-clap = { version = "4.5.21", features = ["derive"] }
+anyhow = "1.0.99"
+bzip2 = "0.6.0"
+chrono = "0.4.41"
+clap = { version = "4.5.45", features = ["derive"] }
 color-print = "0.3.7"
-console = { version = "0.15.8", features = ["windows-console-colors"] }
+console = { version = "0.16.0", features = ["windows-console-colors"] }
+crossbeam-channel = "0.5.15"
+ctrlc = "3.4.7"
 hex = "0.4.3"
-indicatif = "0.17.9"
-memmap2 = "0.9.5"
+indicatif = "0.18.0"
+memmap2 = { version = "0.9.8" , features = ["stable_deref_trait"] } 
 nom = "7.1.3"
 nom-derive = "0.10.1"
-prost = "0.13.3"
-rayon = "1.10.0"
-lzma-rs = "0.3.0"
-xz2 = { version = "0.1", features = ["static"] }
-sha2 = "0.11.0-pre.4"
+prost = "0.14.1"
+rayon = "1.11.0"
+lzma-sys = { version = "0.1.20", features = ["static"] }
+xz2 = { version = "0.1.7", features = ["static"] }
+sha2 = { version = "0.10.9", default-features = false }
 sync-unsafe-cell = "0.1.1"
-tempfile = "3.14.0"
-zip = { version = "2.2.1", features = [
+tempfile = "3.21.0"
+zip = { version = "4.5.0", features = [
     "deflate",
     "bzip2",
     "zstd",
@@ -40,10 +42,33 @@ zip = { version = "2.2.1", features = [
 
 
 [build-dependencies]
-prost-build = "0.13.3"
+prost-build = "0.14.1"
+
+[features]
+# ---- Feature Notes ----
+# asm-sha2 = ["sha2/asm"]
+#   Enables assembly-optimized SHA-256 (via sha2/asm).
+#   On Linux/macOS (Unix), this is enabled by default for faster hashing.
+#   On Windows (MSVC) and Windows (GNU), it's left disabled because inline assembly is not supported.
+# To disable defaults (e.g., for debugging):
+# cargo build --release --no-default-features
+asm-sha2 = ["sha2/asm"]
+
+# Default features for Unix systems (Linux, macOS)
+[target.'cfg(unix)'.dependencies]
+sha2 = { version = "0.10.9", default-features = false, features = ["asm"] }
+
+[target.'cfg(gnu)'.dependencies]
+sha2 = { version = "0.10.9", default-features = false, features = ["asm"] }
 
 [profile.release]
 codegen-units = 1
 debug = 0
-lto = true
+lto = "fat"
 strip = true
+opt-level = 3
+panic = "abort"
+overflow-checks = false
+incremental = false
+
+
