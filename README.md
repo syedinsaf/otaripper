@@ -61,6 +61,7 @@ otaripper ota.zip --partitions boot,init_boot
 
 # Specify OTA file with -p and output directory with -o
 otaripper -p path/to/ota.zip -o path/to/output_dir
+```
 
 ### Common Workflows
 
