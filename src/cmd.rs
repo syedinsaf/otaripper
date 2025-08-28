@@ -645,7 +645,7 @@ unsafe fn is_all_zero_sse2(data: &[u8]) -> bool {
             let zero = _mm_setzero_si128();
             let cmp = _mm_cmpeq_epi8(chunk, zero);
             let mask = _mm_movemask_epi8(cmp);
-            if mask != -1 {
+            if mask != 0xFFFF {
                 return false;
             }
             i += 16;
