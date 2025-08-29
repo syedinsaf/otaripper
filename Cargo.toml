@@ -28,11 +28,8 @@ memmap2 = { version = "0.9.8" , features = ["stable_deref_trait"] }
 nom = "8.0.0"
 prost = "0.14.1"
 rayon = "1.11.0"
-lzma-sys = { version = "0.1.20", features = ["static"] }
 xz2 = { version = "0.1.7", features = ["static"] }
 sha2 = { version = "0.10.9", default-features = false }
-sync-unsafe-cell = "0.1.1"
-tempfile = "3.21.0"
 zip = { version = "4.5.0", features = [
     "deflate",
     "bzip2",
