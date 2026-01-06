@@ -1,9 +1,9 @@
 use crate::chromeos_update_engine::install_operation::Type;
 use crate::chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUpdate};
 use crate::payload::Payload;
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{bail, ensure, Context, Result};
 use bzip2::read::BzDecoder;
-use chrono::Utc;
+use chrono::Local;
 use clap::{Parser, ValueHint};
 use console::Style;
 use crossbeam_channel::unbounded;
@@ -17,43 +17,28 @@ use sha2::{Digest, Sha256};
 use std::arch::x86_64::*;
 use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::convert::TryFrom;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::ops::{Deref, Div, Mul};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use std::{env, slice};
 use zip::ZipArchive;
-use zip::result::ZipError;
 
-const INLINE_HASHING_THRESHOLD: usize = 256 * 1024 * 1024; // 256 MiB threshold for inline hashing
-const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64KB chunk size for cache-friendly copying
-const SIMD_THRESHOLD: usize = 1024; // Use SIMD for copies >= 1KB
-const PROGRESS_UPDATE_FREQUENCY_HIGH: u8 = 2; // Hz for progress updates when partition count <= 32
-const PROGRESS_UPDATE_FREQUENCY_LOW: u8 = 1; // Hz for progress updates when partition count > 32
-
-const _HELP_TEMPLATE: &str = color_print::cstr!(
-    "\
-{before-help}<bold><underline>{name} {version}</underline></bold>
-{author}
-https://github.com/syedinsaf/otaripper
-
-{about}
-
-{usage-heading}
-{tab}{usage}
-
-{all-args}{after-help}"
-);
+const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64 KiB: balances cache efficiency and overhead in chunked processing
+const SIMD_THRESHOLD: usize = 1024; // 1 KiB: minimum size to justify SIMD overhead
+const PROGRESS_UPDATE_FREQUENCY_HIGH: u8 = 2; // 2 Hz refresh when ≤32 partitions (smooth without flicker)
+const PROGRESS_UPDATE_FREQUENCY_LOW: u8 = 1; // 1 Hz refresh when >32 partitions (prevents terminal spam)
+                                             // Android OTA payload specification limits
+const MIN_BLOCK_SIZE: usize = 512;
+const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 
 #[derive(Debug, Parser)]
 #[clap(
     about,
     author,
-    disable_help_subcommand = true,
     help_template = FRIENDLY_HELP,
     propagate_version = true,
     version = env!("CARGO_PKG_VERSION"),
@@ -104,12 +89,12 @@ pub struct Cmd {
     )]
     print_hash: bool,
 
-    /// Run lightweight plausibility checks on output images (e.g., detect all-zero images)
+    /// Run lightweight sanity checks on output images (e.g., detect all-zero images)
     #[clap(
         long,
         help = "Run quick sanity checks on output images and fail on obviously invalid content (e.g., all zeros)."
     )]
-    plausibility_checks: bool,
+    sanity: bool,
 
     /// Print per-partition and total timing/throughput statistics after extraction
     #[clap(
@@ -136,8 +121,6 @@ pub enum PayloadSource {
     Owned(Vec<u8>),
 }
 
-// The Deref trait allows PayloadSource to be treated like a byte slice `&[u8]`,
-// making its use seamless with the existing parsing logic.
 impl Deref for PayloadSource {
     type Target = [u8];
 
@@ -149,112 +132,19 @@ impl Deref for PayloadSource {
     }
 }
 
-/// Merge contiguous output slices to reduce copy operations
-///
-/// This function takes a vector of mutable byte slices and merges adjacent ones
-/// that are contiguous in memory. This optimization reduces the number of copy
-/// operations needed when writing data to multiple extents.
-///
-/// # Safety
-/// Merges adjacent slices from the same memory buffer.
-/// # Arguments
-///
-/// * `extents` - A vector of mutable byte slices to be coalesced
-fn coalesce_extents(extents: &mut Vec<&mut [u8]>) {
-    if extents.is_empty() {
-        return;
-    }
-    // Merge adjacent slices to reduce copy operations
-    let mut tmp: Vec<&mut [u8]> = Vec::with_capacity(extents.len());
-    tmp.extend(extents.drain(..));
-
-    let mut out: Vec<&mut [u8]> = Vec::with_capacity(tmp.len());
-    let mut cur = tmp.remove(0);
-
-    for nxt in tmp {
-        let cur_end = cur.as_ptr() as usize + cur.len();
-        let nxt_start = nxt.as_ptr() as usize;
-        if cur_end == nxt_start {
-            let new_len = cur.len() + nxt.len();
-            let start_ptr = cur.as_mut_ptr();
-
-            // Safety: We know both slices are valid and adjacent within the same buffer
-            // The new slice will be within the bounds of the original buffer
-            cur = unsafe {
-                // Verify the new slice doesn't exceed the original buffer bounds
-                let original_end = start_ptr.add(new_len);
-                if original_end <= start_ptr.add(cur.len() + nxt.len()) {
-                    core::slice::from_raw_parts_mut(start_ptr, new_len)
-                } else {
-                    // Fallback to separate slices if bounds check fails
-                    out.push(cur);
-                    cur = nxt;
-                    continue;
-                }
-            };
-        } else {
-            out.push(cur);
-            cur = nxt;
-        }
-    }
-    out.push(cur);
-    *extents = out;
-}
-
 /// Writes data across multiple memory regions efficiently with optional hashing.
-pub struct ExtentsWriter<'a> {
-    extents: &'a mut [&'a mut [u8]],
+pub struct ExtentsWriter<'a, 'b> {
+    extents: &'a mut [&'b mut [u8]],
     idx: usize,
     off: usize,
-    /// Optional hasher for on-the-fly hashing while writing.
-    hasher: Option<Sha256>,
-    /// Total bytes written (for diagnostics/validation)
-    total_written: usize,
 }
-
-impl<'a> ExtentsWriter<'a> {
-    /// Create a new ExtentsWriter without hashing
-    pub fn new(extents: &'a mut [&'a mut [u8]]) -> Self {
+impl<'a, 'b> ExtentsWriter<'a, 'b> {
+    /// Create a new ExtentsWriter for writing to the given extents.
+    pub fn new(extents: &'a mut [&'b mut [u8]]) -> Self {
         Self {
             extents,
             idx: 0,
             off: 0,
-            hasher: None,
-            total_written: 0,
-        }
-    }
-
-    /// Create a writer that also computes SHA-256 of all bytes written
-    pub fn new_with_hasher(extents: &'a mut [&'a mut [u8]]) -> Self {
-        Self {
-            extents,
-            idx: 0,
-            off: 0,
-            hasher: Some(Sha256::new()),
-            total_written: 0,
-        }
-    }
-
-    /// Finalize and return the computed SHA-256 if hashing was enabled
-    pub fn finalize_hash(mut self) -> Option<[u8; 32]> {
-        self.hasher.take().map(|h| {
-            let out = h.finalize();
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&out);
-            arr
-        })
-    }
-
-    /// Get the total number of bytes written
-    #[allow(dead_code)]
-    pub fn bytes_written(&self) -> usize {
-        self.total_written
-    }
-    #[inline]
-    fn advance_to_available_extent(&mut self) {
-        while self.idx < self.extents.len() && self.off >= self.extents[self.idx].len() {
-            self.idx += 1;
-            self.off = 0;
         }
     }
 
@@ -273,75 +163,43 @@ impl<'a> ExtentsWriter<'a> {
     }
 
     /// Write data using optimized copying strategies with SIMD acceleration
-    #[inline]
+    #[inline(always)]
     fn write_to_current_extent(&mut self, data: &[u8]) -> usize {
         let available = self.current_extent_capacity();
-        if available == 0 {
+        if available == 0 || data.is_empty() {
             return 0;
         }
-
         let to_copy = available.min(data.len());
-        if to_copy == 0 {
-            return 0;
-        }
 
-        // Safety check: ensure we don't exceed the extent bounds
-        if self.idx >= self.extents.len() || self.off >= self.extents[self.idx].len() {
-            return 0;
-        }
-
+        // Bounds are guaranteed: current_extent_capacity() returned non-zero,
+        // which ensures self.idx is valid and to_copy fits within the extent
         let extent = &mut self.extents[self.idx];
-
-        // Additional bounds check for the extent slice
-        if self.off + to_copy > extent.len() {
-            return 0;
-        }
-
         let dest_slice = &mut extent[self.off..self.off + to_copy];
         let src_slice = &data[..to_copy];
 
-        if let Some(ref mut hasher) = self.hasher {
-            hasher.update(src_slice);
-        }
-
-        // SIMD-optimized copying strategies based on size
-        match to_copy {
-            // Very small copies: direct slice assignment (compiler optimizes well)
-            1..=8 => {
-                dest_slice.copy_from_slice(src_slice);
-            }
-            // Medium copies: use copy_from_slice (LLVM optimizes to memcpy)
-            9..=SIMD_THRESHOLD => {
-                dest_slice.copy_from_slice(src_slice);
-            }
-            // Large copies: use SIMD-optimized copying
-            _ => {
-                simd_copy_large(src_slice, dest_slice);
-            }
+        // Hot path first: large copies (>= 1KB) use SIMD — this is the common case
+        if to_copy >= SIMD_THRESHOLD {
+            simd_copy_large(src_slice, dest_slice);
+        } else {
+            dest_slice.copy_from_slice(src_slice);
         }
 
         self.off += to_copy;
-        self.total_written += to_copy;
-
         if self.off >= extent.len() {
             self.idx += 1;
             self.off = 0;
         }
-
         to_copy
     }
 }
 
-impl<'a> io::Write for ExtentsWriter<'a> {
+impl<'a, 'b> io::Write for ExtentsWriter<'a, 'b> {
     fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
         }
 
         let mut total_written = 0;
-
-        // Skip extents that are already full
-        self.advance_to_available_extent();
 
         // Write to available extents
         while !buf.is_empty() && self.has_capacity() {
@@ -353,11 +211,6 @@ impl<'a> io::Write for ExtentsWriter<'a> {
 
             total_written += written;
             buf = &buf[written..];
-
-            // Advance to next extent if needed
-            if !buf.is_empty() {
-                self.advance_to_available_extent();
-            }
         }
 
         Ok(total_written)
@@ -368,7 +221,9 @@ impl<'a> io::Write for ExtentsWriter<'a> {
     }
 }
 
-/// SIMD detection enum
+/// Runtime CPU feature detection for SIMD acceleration.
+/// Uses `OnceLock` for thread-safe lazy initialization.
+/// Debug output enabled via `OTARIPPER_DEBUG_CPU=1`.
 #[cfg(target_arch = "x86_64")]
 #[derive(Debug, Clone, Copy)]
 enum CpuSimd {
@@ -467,13 +322,25 @@ fn simd_copy_large(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn simd_copy_chunk(src: &[u8], dst: &mut [u8]) {
     #[cfg(target_arch = "x86_64")]
     {
         match CpuSimd::get() {
-            CpuSimd::Avx512 => unsafe { simd_copy_avx512(src, dst) },
-            CpuSimd::Avx2 => unsafe { simd_copy_avx2(src, dst) },
+            CpuSimd::Avx512 => unsafe {
+                if src.len() >= 1_048_576 {
+                    simd_copy_avx512_stream(src, dst);
+                } else {
+                    simd_copy_avx512(src, dst);
+                }
+            },
+            CpuSimd::Avx2 => unsafe {
+                if src.len() >= 1_048_576 {
+                    simd_copy_avx2_stream(src, dst);
+                } else {
+                    simd_copy_avx2(src, dst);
+                }
+            },
             CpuSimd::Sse2 => unsafe { simd_copy_sse2(src, dst) },
             CpuSimd::None => dst.copy_from_slice(src),
         }
@@ -484,7 +351,7 @@ fn simd_copy_chunk(src: &[u8], dst: &mut [u8]) {
     }
 }
 /// Public function: zero-check with SIMD auto-dispatch
-#[inline]
+#[inline(always)]
 fn is_all_zero(data: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
@@ -520,11 +387,45 @@ unsafe fn simd_copy_avx512(src: &[u8], dst: &mut [u8]) {
         i += 64;
     }
 
-    // Handle remaining bytes with scalar copy
     if i < len {
         let remaining_src = &src[i..];
         let remaining_dst = &mut dst[i..];
         remaining_dst.copy_from_slice(remaining_src);
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f")]
+unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
+    let len = src.len();
+
+    if len < 1_048_576 {
+        unsafe {
+            return simd_copy_avx512(src, dst);
+        }
+    }
+
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+    let mut i = 0;
+
+    // Work in 64-byte blocks
+    let simd_end = len & !63;
+    while i < simd_end {
+        unsafe {
+            let data = _mm512_loadu_si512(src_ptr.add(i) as *const __m512i);
+            _mm512_stream_si512(dst_ptr.add(i) as *mut __m512i, data);
+        }
+        i += 64;
+    }
+    unsafe {
+        _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
+                      // This ensures data is globally visible before we signal
+                      // that this operation is complete.
+    }
+    // Tail
+    if i < len {
+        dst[i..].copy_from_slice(&src[i..]);
     }
 }
 
@@ -546,11 +447,46 @@ unsafe fn simd_copy_avx2(src: &[u8], dst: &mut [u8]) {
         i += 32;
     }
 
-    // Handle remaining bytes with scalar copy
     if i < len {
         let remaining_src = &src[i..];
         let remaining_dst = &mut dst[i..];
         remaining_dst.copy_from_slice(remaining_src);
+    }
+}
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
+    let len = src.len();
+
+    if len < 1_048_576 {
+        unsafe {
+            return simd_copy_avx2(src, dst);
+        }
+    }
+
+    let src_ptr = src.as_ptr();
+    let dst_ptr = dst.as_mut_ptr();
+    let mut i = 0;
+
+    // Work in 32-byte blocks
+    let simd_end = len & !31;
+    while i < simd_end {
+        unsafe {
+            let data = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
+            _mm256_stream_si256(dst_ptr.add(i) as *mut __m256i, data);
+        }
+        i += 32;
+    }
+
+    unsafe {
+        _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
+                      // This ensures data is globally visible before we signal
+                      // that this operation is complete.
+    }
+    // Tail
+    if i < len {
+        dst[i..].copy_from_slice(&src[i..]);
     }
 }
 
@@ -572,7 +508,6 @@ unsafe fn simd_copy_sse2(src: &[u8], dst: &mut [u8]) {
         i += 16;
     }
 
-    // Handle remaining bytes with scalar copy
     if i < len {
         let remaining_src = &src[i..];
         let remaining_dst = &mut dst[i..];
@@ -609,7 +544,7 @@ unsafe fn is_all_zero_avx512(data: &[u8]) -> bool {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn is_all_zero_avx2(data: &[u8]) -> bool {
-    let len = data.len();
+    let len: usize = data.len();
     let ptr = data.as_ptr();
     let mut i = 0;
     let simd_end = len.saturating_sub(31);
@@ -654,6 +589,8 @@ unsafe fn is_all_zero_sse2(data: &[u8]) -> bool {
     data[i..].iter().all(|&b| b == 0)
 }
 
+// Main extraction loop: process partitions in descending size order
+// for better progress bar visibility and cache behavior.
 impl Cmd {
     pub fn run(&self) -> Result<()> {
         // Initialize SIMD detection early - this ensures SIMD capabilities are
@@ -687,11 +624,24 @@ impl Cmd {
         let mut manifest =
             DeltaArchiveManifest::decode(payload.manifest).context("unable to parse manifest")?;
         let block_size = manifest.block_size.context("block_size not defined")? as usize;
-
-        // Allow a hidden override for inline hashing: OTARIPPER_INLINE=on|off|auto
-        let env_inline = std::env::var("OTARIPPER_INLINE")
-            .ok()
-            .map(|s| s.to_lowercase());
+        ensure!(
+            block_size >= 512 && block_size <= 16 * 1024 * 1024,
+            "invalid block_size: {} (must be between {} and {})",
+            block_size,
+            MIN_BLOCK_SIZE,
+            MAX_BLOCK_SIZE
+        );
+        // REJECT INCREMENTAL (DELTA) OTAs
+        if manifest.partial_update == Some(true) ||
+        manifest.partitions.iter().any(|p| p.old_partition_info.is_some())
+        {
+            bail!(
+                "❌ Incremental OTA not supported.\n\
+                This appears to be a delta update (partial_update=true or old_partition_info present).\n\
+                otaripper only supports full OTA payloads (complete partition images).\n\
+                📌 Tip: Use a full OTA zip — incremental/delta OTAs are not supported."
+            );
+        }
 
         if self.list {
             manifest
@@ -723,7 +673,9 @@ impl Cmd {
                 bail!("partition \"{}\" not found in manifest", partition);
             }
         }
-
+        // Sort partitions by size (descending).
+        // Processing larger partitions first improves threadpool utilization and
+        // ensures the most time-consuming progress bars start immediately.
         manifest.partitions.sort_unstable_by_key(|partition| {
             Reverse(
                 partition
@@ -820,42 +772,51 @@ impl Cmd {
         let cancellation_token_ctrlc = Arc::clone(&cancellation_token);
 
         ctrlc::set_handler(move || {
-            eprintln!("\n\n Received interrupt signal (Ctrl+C). Cleaning up and exiting...");
+            eprintln!("\n\nReceived interrupt signal (Ctrl+C). Cleaning up and exiting...");
 
-            // Signal all worker threads to stop
+            // Signal all workers to abort
             cancellation_token_ctrlc.store(true, Ordering::Release);
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            // Perform cleanup
-            if let Ok(state) = cleanup_state_ctrlc.lock() {
+
+            // Best-effort cleanup — avoid blocking in signal handler
+            if let Ok(state) = cleanup_state_ctrlc.try_lock() {
                 let (files, dir, dir_is_new) = &*state;
+
                 if !files.is_empty() {
-                    eprintln!("Removing {} partially extracted files...", files.len());
-                    let mut removed_files = 0;
-                    for file in files {
+                    eprintln!("Removing {} partially extracted file(s)...", files.len());
+                    let mut removed = 0;
+                    for file in files.iter() {
                         if file.exists() {
-                            if let Err(e) = fs::remove_file(file) {
-                                eprintln!("Failed to remove {}: {}", file.display(), e);
+                            if fs::remove_file(file).is_ok() {
+                                removed += 1;
                             } else {
-                                removed_files += 1;
+                                eprintln!("  ⚠️ Failed to remove: {}", file.display());
                             }
                         }
                     }
-                    if removed_files > 0 {
-                        eprintln!("Cleaned up {} partially extracted files", removed_files);
+                    if removed > 0 {
+                        eprintln!("Cleaned up {} partial file(s).", removed);
                     }
                 }
-                // If we created the directory, remove it entirely
+
                 if *dir_is_new && dir.exists() {
-                    if let Err(e) = fs::remove_dir_all(dir) {
-                        eprintln!("Failed to remove directory {}: {}", dir.display(), e);
+                    if fs::remove_dir_all(dir).is_ok() {
+                        eprintln!("Removed temporary extraction directory: {}", dir.display());
                     } else {
-                        eprintln!("Removed extraction directory: {}", dir.display());
+                        eprintln!(
+                            "⚠️ Failed to remove extraction directory: {}",
+                            dir.display()
+                        );
                     }
                 }
+            } else {
+                eprintln!(
+                    "⚠️ Warning: Could not acquire cleanup lock (likely due to a thread panic)."
+                );
+                eprintln!("   Please manually check your output directory for partial files.");
             }
 
-            eprintln!("✨ Cleanup completed. Goodbye!");
-            std::process::exit(130); // Standard exit code for Ctrl+C (128 + SIGINT)
+            eprintln!("✨ Goodbye!");
+            std::process::exit(130);
         })
         .context("Failed to set up Ctrl+C handler")?;
 
@@ -914,9 +875,12 @@ impl Cmd {
             };
             // Maintain the manifest/extraction order for neatly printing hashes later
             let mut hash_index_counter: usize = 0;
+            // Process partitions in descending size order for better I/O locality and progress visibility
             for update in manifest.partitions.iter().filter(|update| {
                 self.partitions.is_empty() || self.partitions.contains(&update.partition_name)
             }) {
+                self.validate_non_overlapping_extents(&update.operations)
+                    .with_context(|| format!("Invalid extents in partition '{}'", update.partition_name))?;
                 if cancellation_token.load(Ordering::Acquire) {
                     eprintln!("Extraction cancelled before processing '{}'", update.partition_name);
                     break;
@@ -927,10 +891,9 @@ impl Cmd {
                     self.open_partition_file(update, partition_dir)?;
                 // Track the file we just created for cleanup in case of errors
                 if let Ok(mut state) = cleanup_state.lock() {
-                    state.0.push(out_path.clone());
+                    state.0.push(out_path);
                 }
 
-                // Stats start for this partition (optional)
                 let part_start = if self.stats { Some(Instant::now()) } else { None };
                 let stats_sender = stats_sender.clone();
 
@@ -940,26 +903,12 @@ impl Cmd {
                 let hash_sender = hash_sender.clone();
 
                 let remaining_ops = Arc::new(AtomicUsize::new(update.operations.len()));
-                let inline_digest: Arc<Mutex<Option<[u8;32]>>> = Arc::new(Mutex::new(None));
-
-                // Silent heuristic: enable inline hashing for large partitions to avoid a post-pass.
-                let heuristic = partition_len >= INLINE_HASHING_THRESHOLD;
-                // Default to OFF (post-pass). Allow env overrides:
-                // OTARIPPER_INLINE=on  -> force inline on
-                // OTARIPPER_INLINE=off -> force inline off
-                // OTARIPPER_INLINE=auto -> use size heuristic (256 MiB)
-                let inline_enabled = match env_inline.as_deref() {
-                    Some("on") => true,
-                    Some("off") => false,
-                    Some("auto") => heuristic,
-                    None => false,
-                    _ => false,
-                };
-
+              
                 for op in update.operations.iter() {
                     let progress_bar = progress_bar.clone();
                     let partition_file = Arc::clone(&partition_file);
                     let remaining_ops = Arc::clone(&remaining_ops);
+
 
                     let part_name = update.partition_name.clone();
                     let part_start = part_start;
@@ -967,91 +916,77 @@ impl Cmd {
                     let partition_len_for_stats = partition_len;
                     let part_index = part_index;
                     let hash_sender = hash_sender.clone();
-                    let inline_digest = inline_digest.clone();
                     let cancellation_token = Arc::clone(&cancellation_token);
                     scope.spawn(move |_| {
                         if cancellation_token.load(Ordering::Acquire) {
                             return;
                         }
-                        // SAFETY: Scoped threads ensure mmap stays alive, operations write to separate regions
                         let result = {
-                            let mmap_guard = partition_file.read().expect("RwLock poisoned");
-                            let partition_slice = unsafe {
-                                slice::from_raw_parts_mut(
-                                    mmap_guard.as_ptr() as *mut u8,
-                                    mmap_guard.len()
-                                )
+                            // We drop the ReadGuard immediately to avoid any reference aliasing.
+                            let (base_ptr, partition_len) = {
+                                let mmap_guard = partition_file.read().expect("RwLock poisoned");
+                                let slice: &[u8] = &*mmap_guard;
+                                (slice.as_ptr() as *mut u8, slice.len())
                             };
-                            self.run_op_safe(op, payload, partition_slice, block_size, inline_enabled)
+
+                            self.run_op_raw(
+                                op,
+                                payload,
+                                base_ptr,
+                                partition_len,
+                                block_size,
+                            )
                         };
                         match result {
-                            Ok(maybe_digest) => {
-                                if cancellation_token.load(Ordering::Acquire) {
-                                    return;
-                                }
-                                if let Some(d) = maybe_digest {
-                                    if let Ok(mut lock) = inline_digest.lock() {
-                                        *lock = Some(d);
-                                    }
-                                }
-                            }
+                            Ok(_) => {}
                             Err(e) => {
-                                // Set cancellation token to stop other threads
                                 cancellation_token.store(true, Ordering::Release);
                                 eprintln!("\nCritical error: Operation '{}' failed: {}", op.r#type, e);
                                 eprintln!("Stopping extraction to prevent corrupted output...");
                                 return;
                             }
                         }
-
-                        if cancellation_token.load(Ordering::Acquire) {
-                            return;
-                        }
-
-                        // If this is the last operation of the partition, run post-processing.
                         if remaining_ops.fetch_sub(1, Ordering::AcqRel) == 1 {
-                            let final_slice = {
-                                let mmap_guard = partition_file.read().expect("RwLock poisoned");
-                                // Convert to a slice for verification
-                                unsafe {
-                                    slice::from_raw_parts(
-                                        mmap_guard.as_ptr(),
-                                        mmap_guard.len()
-                                    )
-                                }
-                            };
+                            // VERIFICATION PHASE: Exclusive access via write lock ensures all 
+                            // hardware store-buffers are synchronized and visible.
+                        
+
+
+                            let mmap_guard = partition_file.write().expect("RwLock poisoned");
+                            let final_slice: &[u8] = &*mmap_guard;
+                            
 
                             // 1) Verification when enabled and hash provided
-                            // Also capture computed digest to reuse for printing (avoids a second pass)
-                            // Prefer inline digest if any op computed it while writing.
                             let mut computed_digest_opt: Option<[u8; 32]> = None;
-                            if let Ok(lock) = inline_digest.lock() {
-                                if let Some(d) = *lock {
-                                    computed_digest_opt = Some(d);
-                                }
-                            }
-                            if computed_digest_opt.is_none() && !self.no_verify {
+                            if !self.no_verify {
                                 if let Some(hash) = update
                                     .new_partition_info
                                     .as_ref()
-                                    .and_then(|info| info.hash.as_ref())
+                                    .and_then(|info| info.hash.as_ref())    
                                 {
                                     match self.verify_sha256_returning(final_slice, hash) {
                                         Ok(d) => computed_digest_opt = Some(d),
                                         Err(e) => {
                                             cancellation_token.store(true, Ordering::Release);
-                                            eprintln!("\nCritical error: Output verification failed for '{}': {}", part_name, e);
+                                            eprintln!(
+                                                "\nCritical error: Output verification failed for '{}': {}",
+                                                part_name, e
+                                            );
                                             eprintln!("Stopping extraction to prevent corrupted output...");
                                             return;
                                         }
                                     }
                                 } else if self.strict {
                                     cancellation_token.store(true, Ordering::Release);
-                                    eprintln!("\nCritical error: Strict mode: missing partition hash for '{}'", part_name);
+                                    eprintln!(
+                                        "\nCritical error: Strict mode: missing partition hash for '{}'",
+                                        part_name
+                                    );
                                     eprintln!("Stopping extraction to prevent corrupted output...");
                                     return;
                                 }
                             }
+                            
 
                             // Check cancellation before continuing
                             if cancellation_token.load(Ordering::Acquire) {
@@ -1059,11 +994,11 @@ impl Cmd {
                                 return;
                             }
 
-                            // 2) Plausibility checks (e.g., detect all-zero images)
-                            if self.plausibility_checks {
+                            // 2) Sanity checks (e.g., detect all-zero images)
+                            if self.sanity {
                                 if is_all_zero(final_slice) {
                                     cancellation_token.store(true, Ordering::Release);
-                                    eprintln!("\nCritical error: Plausibility check failed for '{}': output image appears to be all zeros", part_name);
+                                    eprintln!("\nCritical error: Sanity check failed for '{}': output image appears to be all zeros", part_name);
                                     eprintln!("Stopping extraction to prevent corrupted output...");
                                     return;
                                 }
@@ -1074,15 +1009,15 @@ impl Cmd {
                                 eprintln!("Post-processing for '{}' cancelled", part_name);
                                 return;
                             }
-
-                            // 3) Optional recording of SHA-256 for the partition (printed later to keep output clean)
+                            // 3) Print SHA-256 if requested — reuse verified digest to avoid redundant work
                             if let Some(sender) = hash_sender.as_ref() {
-                                let hexstr = if let Some(d) = computed_digest_opt {
-                                    hex::encode(d)
+                                let digest = if let Some(d) = computed_digest_opt {
+                                    d // Already computed during verification (full image)
                                 } else {
-                                    let digest = Sha256::digest(final_slice);
-                                    hex::encode(digest)
+                                    let hash_array = Sha256::digest(final_slice); 
+                                    hash_array.into()
                                 };
+                                let hexstr = hex::encode(digest);
                                 let _ = sender.send(HashRec { order: part_index, name: part_name.clone(), hex: hexstr });
                             }
 
@@ -1205,85 +1140,52 @@ impl Cmd {
         Ok(bar)
     }
 
-    /// Processes an individual operation from the payload manifest with proper lifetime safety.
-    ///
-    /// This is a safe wrapper around the operation processing that takes a mutable slice
-    /// instead of a raw pointer, ensuring proper lifetime management.
-    fn run_op_safe(
+    /// # Safety
+    /// This function is the core of otaripper's high-performance extraction.
+    /// It is sound because:
+    /// 1. `base_ptr` is guaranteed to be valid for `partition_len` as long as the
+    ///    `partition_file` Mmap is alive.
+    /// 2. Scoped threads (`rayon::scope`) ensure that worker threads cannot outlive
+    ///     the `Mmap` lifetime.
+    /// 3. `validate_non_overlapping_extents` proves that no two threads can receive
+    ///    the same memory range, preventing data races and mutable aliasing UB.
+    fn run_op_raw(
         &self,
         op: &InstallOperation,
         payload: &Payload,
-        partition_slice: &mut [u8],
+        base_ptr: *mut u8,
+        partition_len: usize,
         block_size: usize,
-        inline_enabled: bool,
-    ) -> Result<Option<[u8; 32]>> {
-        let mut dst_extents = self
-            .extract_dst_extents_safe(op, partition_slice, block_size)
-            .context("error extracting dst_extents")?;
+    ) -> Result<()> {
+        let raw_extents = self.extract_dst_extents_raw(op, base_ptr, partition_len, block_size)?;
 
-        match Type::try_from(op.r#type) {
-            Ok(Type::Replace) => {
-                let data = self
-                    .extract_data(op, payload)
-                    .context("error extracting data")?;
-                self.run_op_replace_slice(data, &mut dst_extents, block_size, inline_enabled)
-                    .context("error in REPLACE operation")
+        // Convert to temporary &mut [u8] — safe because:
+        // - Extents are non-overlapping (validated globally)
+        // - No other thread writes to these exact byte ranges
+        // - These slices are NOT derived from a shared RwLock guard
+        let mut dst_extents: Vec<&mut [u8]> = raw_extents
+            .into_iter()
+            .map(|(ptr, len)| unsafe { slice::from_raw_parts_mut(ptr, len) })
+            .collect();
+
+        // Now delegate to existing logic
+        match Type::try_from(op.r#type)? {
+            Type::Replace => {
+                let data = self.extract_data(op, payload)?;
+                self.run_op_replace_slice(data, &mut dst_extents, block_size)
             }
-            Ok(Type::ReplaceBz) => {
-                let data = self
-                    .extract_data(op, payload)
-                    .context("error extracting data")?;
+            Type::ReplaceBz => {
+                let data = self.extract_data(op, payload)?;
                 let mut decoder = BzDecoder::new(data);
-                // Streamed readers cannot reliably produce a full-partition inline digest,
-                // so we fall back to no-op for inline digest (return None).
-                self.run_op_replace(&mut decoder, &mut dst_extents, block_size, inline_enabled)
-                    .map(|_| None)
-                    .context("error in REPLACE_BZ operation")
+                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
             }
-            Ok(Type::ReplaceXz) => {
-                let data = self
-                    .extract_data(op, payload)
-                    .context("error extracting data")?;
+            Type::ReplaceXz => {
+                let data = self.extract_data(op, payload)?;
                 let mut decoder = xz2::read::XzDecoder::new(data);
-                self.run_op_replace(&mut decoder, &mut dst_extents, block_size, inline_enabled)
-                    .map(|_| None)
-                    .context("error in REPLACE_XZ operation")
+                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
             }
-            Ok(Type::Zero) => {
-                // This is a no-op since the partition is already zeroed
-                Ok(None)
-            }
-            Ok(Type::Discard) => {
-                // Discard is similar to Zero - we just leave the blocks as they are (zeroed)
-                Ok(None)
-            }
-            Ok(Type::SourceCopy) => {
-                bail!("SOURCE_COPY operation is not supported in this version")
-            }
-            Ok(Type::SourceBsdiff) => {
-                bail!("SOURCE_BSDIFF operation is not supported in this version")
-            }
-            Ok(Type::Puffdiff) => {
-                bail!("PUFFDIFF operation is not supported in this version")
-            }
-            Ok(Type::BrotliBsdiff) => {
-                bail!("BROTLI_BSDIFF operation is not supported in this version")
-            }
-            Ok(Type::Zucchini) => {
-                bail!("ZUCCHINI operation is not supported in this version")
-            }
-            Ok(Type::Lz4diffBsdiff) => {
-                bail!("LZ4DIFF_BSDIFF operation is not supported in this version")
-            }
-            Ok(Type::Lz4diffPuffdiff) => {
-                bail!("LZ4DIFF_PUFFDIFF operation is not supported in this version")
-            }
-            Ok(op_type) => {
-                bail!("Unsupported operation type: {:?}", op_type)
-            }
-            Err(e) => {
-                bail!("Unrecognized operation type: {:?}. Error: {}", op.r#type, e)
-            }
+            Type::Zero | Type::Discard => Ok(()),
+            _ => bail!("Unsupported operation type"),
         }
     }
 
@@ -1292,60 +1194,19 @@ impl Cmd {
         reader: &mut impl Read,
         dst_extents: &mut [&mut [u8]],
         block_size: usize,
-        inline_enabled: bool,
-    ) -> Result<Option<[u8; 32]>> {
-        let mut v: Vec<&mut [u8]> = Vec::with_capacity(dst_extents.len());
-        v.extend(dst_extents.iter_mut().map(|e| &mut **e));
-        coalesce_extents(&mut v);
-        let dst_len = v.iter().map(|e| e.len()).sum::<usize>();
-
-        // Perform the actual write using the coalesced v
-        if inline_enabled {
-            let mut writer = ExtentsWriter::new_with_hasher(v.as_mut_slice());
-            let bytes_read =
-                io::copy(reader, &mut writer).context("failed to write to buffer")? as usize;
-
-            // Efficient EOF check: attempt a small read to confirm no extra bytes remain
-            let mut probe = [0u8; 1];
-            let eof = matches!(reader.read(&mut probe), Ok(0));
-            ensure!(eof, "read fewer bytes than expected");
-
-            // Align number of bytes read to block size. The formula for alignment is:
-            // ((operand + alignment - 1) / alignment) * alignment
-            let bytes_read_aligned = (bytes_read + block_size - 1)
-                .div(block_size)
-                .mul(block_size);
-            ensure!(
-                bytes_read_aligned == dst_len,
-                "more dst blocks than data, even with padding"
-            );
-
-            if let Some(d) = writer.finalize_hash() {
-                return Ok(Some(d));
-            }
-            return Ok(None);
-        } else {
-            let mut writer = ExtentsWriter::new(v.as_mut_slice());
-            let bytes_read =
-                io::copy(reader, &mut writer).context("failed to write to buffer")? as usize;
-
-            // Efficient EOF check: attempt a small read to confirm no extra bytes remain
-            let mut probe = [0u8; 1];
-            let eof = matches!(reader.read(&mut probe), Ok(0));
-            ensure!(eof, "read fewer bytes than expected");
-
-            // Align number of bytes read to block size. The formula for alignment is:
-            // ((operand + alignment - 1) / alignment) * alignment
-            let bytes_read_aligned = (bytes_read + block_size - 1)
-                .div(block_size)
-                .mul(block_size);
-            ensure!(
-                bytes_read_aligned == dst_len,
-                "more dst blocks than data, even with padding"
-            );
-
-            return Ok(None);
-        }
+    ) -> Result<()> {
+        let dst_len = dst_extents.iter().map(|e| e.len()).sum::<usize>();
+        let bytes_read = io::copy(reader, &mut ExtentsWriter::new(dst_extents))
+            .context("failed to write to buffer")? as usize;
+        let bytes_read_aligned = bytes_read
+            .saturating_add(block_size.saturating_sub(1))
+            .saturating_div(block_size)
+            .saturating_mul(block_size);
+        ensure!(
+            bytes_read_aligned == dst_len,
+            "more dst blocks than data, even with padding"
+        );
+        Ok(())
     }
 
     fn run_op_replace_slice(
@@ -1353,90 +1214,59 @@ impl Cmd {
         data: &[u8],
         dst_extents: &mut [&mut [u8]],
         block_size: usize,
-        inline_enabled: bool,
-    ) -> Result<Option<[u8; 32]>> {
+    ) -> Result<()> {
         let bytes_read = data.len();
-        // Build a local Vec to allow coalescing
-        let mut v: Vec<&mut [u8]> = dst_extents.iter_mut().map(|e| &mut **e).collect();
-        coalesce_extents(&mut v);
-        let dst_len: usize = v.iter().map(|e| e.len()).sum();
-
-        // If this operation writes the entire destination in one shot, we can compute
-        // the SHA-256 inline while writing and return it to the caller to avoid a
-        // separate post-pass.
-        let bytes_read_aligned = (bytes_read + block_size - 1)
-            .div(block_size)
-            .mul(block_size);
-        if bytes_read_aligned == dst_len {
-            // Single-shot full-partition write: enable inline hashing only when allowed.
-            if inline_enabled {
-                let mut writer = ExtentsWriter::new_with_hasher(v.as_mut_slice());
-                let written = writer.write(data).context("failed to write to buffer")?;
-                ensure!(
-                    written == bytes_read,
-                    "failed to write all data to destination extents"
-                );
-                // finalize and return digest
-                if let Some(d) = writer.finalize_hash() {
-                    return Ok(Some(d));
-                }
-                return Ok(None);
-            } else {
-                let mut writer = ExtentsWriter::new(v.as_mut_slice());
-                let written = writer.write(data).context("failed to write to buffer")?;
-                ensure!(
-                    written == bytes_read,
-                    "failed to write all data to destination extents"
-                );
-                return Ok(None);
-            }
-        }
-
-        // Fallback: no inline digest possible
-        let mut writer = ExtentsWriter::new(v.as_mut_slice());
-        let written = writer.write(data).context("failed to write to buffer")?;
-        // Ensure all data was written
-        ensure!(
-            written == bytes_read,
-            "failed to write all data to destination extents"
-        );
-
-        // Verify alignment rule matches destination length
+        let dst_len: usize = dst_extents.iter().map(|e| e.len()).sum();
+        let bytes_read_aligned = bytes_read
+            .saturating_add(block_size.saturating_sub(1))
+            .saturating_div(block_size)
+            .saturating_mul(block_size);
         ensure!(
             bytes_read_aligned == dst_len,
             "more dst blocks than data, even with padding"
         );
-        Ok(None)
+        let written = ExtentsWriter::new(dst_extents)
+            .write(data)
+            .context("failed to write to buffer")?;
+        ensure!(
+            written == bytes_read,
+            "failed to write all data to destination extents"
+        );
+        Ok(())
     }
 
-    /// In-memory zip handling: returns a `PayloadSource` enum. If the input is a zip
+   /// In-memory zip handling: returns a `PayloadSource` enum. If the input is a zip
     /// file, `payload.bin` is extracted directly to memory instead of a temp file.
     fn open_payload_file(&self, path: &Path) -> Result<PayloadSource> {
         let file = File::open(path)
             .with_context(|| format!("unable to open file for reading: {path:?}"))?;
 
-        // Attempt to open as a zip archive. If it fails with InvalidArchive,
-        // we assume it's a raw payload.bin file.
-        match ZipArchive::new(&file) {
-            Ok(mut archive) => {
-                let mut zipfile = archive
-                    .by_name("payload.bin")
-                    .context("could not find payload.bin file in archive")?;
-
-                let mut buffer = Vec::with_capacity(zipfile.size() as usize);
-                zipfile
-                    .read_to_end(&mut buffer)
-                    .context("failed to decompress payload.bin from archive")?;
-                Ok(PayloadSource::Owned(buffer))
+        // Try to parse as ZIP
+        if let Ok(mut archive) = ZipArchive::new(&file) {
+            match archive.by_name("payload.bin") {
+                Ok(mut zipfile) => {
+                    let mut buffer = Vec::with_capacity(zipfile.size() as usize);
+                    zipfile
+                        .read_to_end(&mut buffer)
+                        .context("Failed to read payload.bin from ZIP")?;
+                    return Ok(PayloadSource::Owned(buffer));
+                }
+                Err(_) => {
+                    // Valid ZIP but missing payload.bin → not a valid OTA
+                    bail!(
+                        "Error: '{}' is a valid ZIP file but does NOT contain 'payload.bin'.\n\
+                        This tool only supports Android OTA updates (must include payload.bin). \n\
+                        📌 Tip: Ensure you're using a full OTA zip — incremental/delta OTAs are not supported.",
+                        path.display()
+                    );
+                }
             }
-            Err(ZipError::InvalidArchive(_)) => {
-                // Not a zip file, so memory-map it directly.
-                let mmap = unsafe { Mmap::map(&file) }
-                    .with_context(|| format!("failed to mmap file: {path:?}"))?;
-                Ok(PayloadSource::Mapped(mmap))
-            }
-            Err(e) => Err(e).context("failed to open zip archive"),
         }
+
+        // Not a ZIP → treat as raw payload.bin
+        let mmap = unsafe { Mmap::map(&file) }
+            .with_context(|| format!("failed to mmap file: {path:?}"))?;
+        Ok(PayloadSource::Mapped(mmap))
     }
 
     fn open_partition_file(
@@ -1453,135 +1283,82 @@ impl Cmd {
         let filename = Path::new(&update.partition_name).with_extension("img");
         let path: PathBuf = partition_dir.as_ref().join(filename);
 
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .with_context(|| format!("unable to open file for writing: {path:?}"))?;
-        file.set_len(partition_len)?;
-        let mmap = unsafe { MmapMut::map_mut(&file) }
-            .with_context(|| format!("failed to mmap file: {path:?}"))?;
-
+        let mmap = {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+                .with_context(|| format!("unable to open file for writing: {path:?}"))?;
+            file.set_len(partition_len)?;
+            unsafe { MmapMut::map_mut(&file) }
+                .with_context(|| format!("failed to mmap file: {path:?}"))?
+        };
         let partition = Arc::new(RwLock::new(mmap));
         Ok((partition, partition_len as usize, path))
     }
 
     fn extract_data<'a>(&self, op: &InstallOperation, payload: &'a Payload) -> Result<&'a [u8]> {
         let data_len = op.data_length.context("data_length not defined")? as usize;
-        let data = {
-            let offset = op.data_offset.context("data_offset not defined")? as usize;
-            payload
-                .data
-                .get(offset..offset + data_len)
-                .context("data offset exceeds payload size")?
-        };
-        match &op.data_sha256_hash {
-            Some(hash) if !self.no_verify => {
+        let offset = op.data_offset.context("data_offset not defined")? as usize;
+
+        let end_offset = offset
+            .checked_add(data_len)
+            .context("data_offset + data_length overflows")?;
+        ensure!(
+            end_offset <= payload.data.len(),
+            "data range {}..{} exceeds payload size {}",
+            offset,
+            end_offset,
+            payload.data.len()
+        );
+
+        let data = &payload.data[offset..end_offset];
+
+        if !self.no_verify {
+            if let Some(hash) = &op.data_sha256_hash {
                 self.verify_sha256(data, hash)
                     .context("input verification failed")?;
             }
-            _ => {}
         }
         Ok(data)
     }
 
-    /// Extract destination extents with proper lifetime safety.
-    ///
-    /// This function now takes a mutable slice reference instead of a raw pointer,
-    /// ensuring proper lifetime management and memory safety.
-    fn extract_dst_extents_safe<'a>(
+    /// Extracts destination extents as (pointer, length) pairs — safe for concurrent use.
+    fn extract_dst_extents_raw(
         &self,
         op: &InstallOperation,
-        partition_slice: &'a mut [u8],
+        base_ptr: *mut u8,
+        partition_len: usize,
         block_size: usize,
-    ) -> Result<Vec<&'a mut [u8]>> {
-        let mut out: Vec<&'a mut [u8]> = Vec::with_capacity(op.dst_extents.len());
-        let partition_len = partition_slice.len();
+    ) -> Result<Vec<(*mut u8, usize)>> {
+        let mut out = Vec::with_capacity(op.dst_extents.len());
+        for extent in &op.dst_extents {
+            let start_block = extent.start_block.context("missing start_block")? as usize;
+            let num_blocks = extent.num_blocks.context("missing num_blocks")? as usize;
 
-        // We need to split the slice into multiple mutable borrows
-        // This is safe because each extent refers to non-overlapping regions
-        let mut remaining_slice = partition_slice;
-        let mut current_offset = 0;
+            let start = start_block
+                .checked_mul(block_size)
+                .context("start_block * block_size overflows")?;
+            let len = num_blocks
+                .checked_mul(block_size)
+                .context("num_blocks * block_size overflows")?;
 
-        // Sort extents by start_block to process them in order
-        let mut sorted_extents: Vec<_> = op.dst_extents.iter().enumerate().collect();
-        sorted_extents.sort_by_key(|(_, extent)| extent.start_block);
-
-        // Create a temporary vector to hold the results in the correct order
-        let mut temp_results: Vec<(usize, &'a mut [u8])> = Vec::with_capacity(op.dst_extents.len());
-
-        for (original_index, extent) in sorted_extents {
-            let start_block = extent
-                .start_block
-                .context("start_block not defined in extent")?
-                as usize;
-            let num_blocks = extent
-                .num_blocks
-                .context("num_blocks not defined in extent")? as usize;
-
-            let partition_offset = start_block * block_size;
-            let extent_len = num_blocks * block_size;
+            ensure!(len != 0, "extent length cannot be zero");
 
             ensure!(
-                partition_offset + extent_len <= partition_len,
-                "extent exceeds partition size: offset {} + length {} > partition size {}",
-                partition_offset,
-                extent_len,
+                start + len <= partition_len,
+                "extent {}..{} exceeds partition size {}",
+                start,
+                start + len,
                 partition_len
             );
 
-            // Calculate the offset within the remaining slice
-            let skip_bytes = partition_offset.saturating_sub(current_offset);
-            ensure!(
-                skip_bytes <= remaining_slice.len(),
-                "invalid extent offset: skip_bytes {} > remaining slice length {}",
-                skip_bytes,
-                remaining_slice.len()
-            );
-
-            // Split off the bytes we need to skip
-            if skip_bytes > 0 {
-                let (_, rest) = remaining_slice.split_at_mut(skip_bytes);
-                remaining_slice = rest;
-                current_offset += skip_bytes;
-            }
-
-            // Ensure we have enough bytes for this extent
-            ensure!(
-                extent_len <= remaining_slice.len(),
-                "not enough bytes for extent: need {} but only have {}",
-                extent_len,
-                remaining_slice.len()
-            );
-
-            // Split off this extent
-            let (extent_slice, rest) = remaining_slice.split_at_mut(extent_len);
-            remaining_slice = rest;
-            current_offset += extent_len;
-
-            temp_results.push((original_index, extent_slice));
+            let ptr = unsafe { base_ptr.add(start) };
+            out.push((ptr, len));
         }
-
-        // Sort results back to original order and extract the slices
-        temp_results.sort_by_key(|(index, _)| *index);
-        out.extend(temp_results.into_iter().map(|(_, slice)| slice));
-
         Ok(out)
     }
-
-    fn verify_sha256(&self, data: &[u8], exp_hash: &[u8]) -> Result<()> {
-        // Use the accelerated SHA-256 (with asm feature enabled in Cargo.toml)
-        let got_hash = Sha256::digest(data);
-        ensure!(
-            got_hash.as_slice() == exp_hash,
-            "hash mismatch: expected {}, got {}",
-            hex::encode(exp_hash),
-            hex::encode(got_hash.as_slice())
-        );
-        Ok(())
-    }
-
     // Same as verify_sha256, but returns the computed digest on success so it can be reused.
     fn verify_sha256_returning(&self, data: &[u8], exp_hash: &[u8]) -> Result<[u8; 32]> {
         let got_hash = Sha256::digest(data);
@@ -1597,21 +1374,52 @@ impl Cmd {
             .expect("sha256 digest must be 32 bytes"))
     }
 
+    fn verify_sha256(&self, data: &[u8], exp_hash: &[u8]) -> Result<()> {
+        self.verify_sha256_returning(data, exp_hash)?;
+        Ok(())
+    }
+
+    fn validate_non_overlapping_extents(&self, operations: &[InstallOperation]) -> Result<()> {
+        let mut all_extents: Vec<(u64, u64)> = operations
+            .iter()
+            .flat_map(|op| op.dst_extents.iter())
+            .map(|extent| {
+                let start = extent.start_block.context("missing start_block")?;
+                let num_blocks = extent.num_blocks.context("missing num_blocks")?;
+                let end = start
+                    .checked_add(num_blocks)
+                    .context("extent end overflows u64")?;
+                Ok((start, end))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        all_extents.sort_unstable_by_key(|(start, _)| *start);
+        let mut last_end = 0;
+        for (start, end) in all_extents {
+            ensure!(
+                start >= last_end,
+                "Overlapping destination extents detected: block {} overlaps with prior extent ending at {}",
+                start,
+                last_end
+            );
+            last_end = end;
+        }
+        Ok(())
+    }
     fn create_partition_dir(&self) -> Result<(Cow<'_, PathBuf>, bool)> {
         let dir: Cow<'_, PathBuf> = match &self.output_dir {
             Some(output_base) => {
                 // When -o is specified, create a timestamped folder within that directory
-                let now = Utc::now();
-                let timestamp_folder = format!("{}", now.format("extracted_%Y%m%d_%H%M%S"));
+                let now = Local::now();
+                let timestamp_folder = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
                 Cow::Owned(output_base.join(timestamp_folder))
             }
             None => {
                 // When no -o is specified, create timestamped folder in current directory
-                let now = Utc::now();
+                let now = Local::now();
                 let current_dir = env::current_dir().with_context(|| {
                     "Failed to determine current directory. Please specify --output-dir explicitly."
                 })?;
-                let filename = format!("{}", now.format("extracted_%Y%m%d_%H%M%S"));
+                let filename = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
                 Cow::Owned(current_dir.join(filename))
             }
         };
@@ -1715,60 +1523,51 @@ impl Cmd {
         #[cfg(target_os = "linux")]
         {
             use std::process::Command;
-            // Try common file managers on Linux
-            let file_managers = ["xdg-open", "nautilus", "dolphin", "thunar", "pcmanfm"];
 
-            for manager in &file_managers {
-                if let Ok(_) = Command::new(manager).arg(dir_path).spawn() {
-                    return Ok(());
-                }
+            // On KDE, using xdg-open triggers a harmless but noisy Qt portal warning (related to kioclient registration).
+            // Spawning Dolphin directly avoids this, while still opening the folder correctly.
+            if Command::new("dolphin").arg(dir_path).spawn().is_ok() {
+                return Ok(());
             }
 
-            eprintln!("Warning: No suitable file manager found to open folder");
+            // Fallback to standard xdg-open for non-KDE desktops
+            if Command::new("xdg-open").arg(dir_path).spawn().is_ok() {
+                return Ok(());
+            }
+
+            eprintln!("Warning: Unable to open folder (dolphin and xdg-open failed)");
         }
 
         Ok(())
     }
 }
 
-// Friendlier, task-oriented help template shown for -h/--help
 const FRIENDLY_HELP: &str = color_print::cstr!(
     "\
 {before-help}<bold><underline>{name} {version}</underline></bold>
 {about}
 
-Quick start:
-  - Drag and drop your OTA .zip or payload.bin onto otaripper, or run:
-    otaripper [path-to-ota.zip|payload.bin]
+<bold>QUICK START</bold>
+  • Drag and drop an OTA .zip or payload.bin onto the executable.
+  • Or run via command line: <cyan>otaripper update.zip</cyan>
 
-Common tasks:
-  - List partitions only:
-    otaripper -l [ota.zip]
-  - Extract everything into a timestamped folder:
-    otaripper [ota.zip]
-  - Extract specific partition(s):
-    otaripper [ota.zip] --partitions boot,init_boot
-  - Choose output directory and threads:
-    otaripper [ota.zip] -o out -t 8
+<bold>COMMON TASKS</bold>
+  • <bold>List</bold> partitions:      otaripper -l update.zip
+  • <bold>Extract all</bold>:       otaripper update.zip
+  • <bold>Extract specific</bold>:  otaripper update.zip --partitions boot,init_boot
+  • <bold>Benchmarking</bold>:      otaripper update.zip --stats
 
-Safety and integrity:
-  - Verification is on by default (SHA-256).
-  - Use --strict to require hashes; do NOT combine with --no-verify.
-  - On any error, extraction stops and partial images are deleted.
-
-Performance enhancements:
-  - SIMD optimization automatically detects and uses AVX512/AVX2/SSE2 for data operations
-  - Multi-threaded extraction with automatic CPU core detection
-
-User experience:
-  - Automatically opens extracted folder when complete (use --no-open-folder to disable)
+<bold>SAFETY & INTEGRITY</bold>
+  • SHA-256 verification is <green>enabled by default</green> for all operations.
+  • Partial images are <red>automatically deleted</red> on error to prevent corruption.
+  • Use <yellow>--strict</yellow> to enforce manifest hash requirements.
 
 {usage-heading}
-{usage}
+  {usage}
 
-Options:
+<bold>OPTIONS</bold>
 {all-args}
 
-Project: https://github.com/syedinsaf/otaripper
+<bold>PROJECT</bold>: <blue>https://github.com/syedinsaf/otaripper</blue>
 {after-help}"
 );
