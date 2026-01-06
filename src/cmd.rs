@@ -18,7 +18,7 @@ use std::arch::x86_64::*;
 use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Write, Seek};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -642,6 +642,36 @@ impl Cmd {
 
         let mut manifest =
             DeltaArchiveManifest::decode(payload.manifest).context("unable to parse manifest")?;
+        let has_incremental_ops = manifest.partitions.iter().any(|p| {
+            p.operations.iter().any(|op| {
+                matches!(
+                    Type::try_from(op.r#type),
+                    Ok(Type::SourceCopy | Type::SourceBsdiff | Type::BrotliBsdiff | Type::Puffdiff | Type::Zucchini)
+                )
+            })
+        });
+
+        if has_incremental_ops {
+            let bold_cyan = Style::new().bold().cyan();
+            let bold_yellow = Style::new().bold().yellow();
+            
+            bail!(
+                "\n{header}\n\n\
+                This file is an {incremental} update (patch). It only contains the {changes} \
+                made between two versions, not the full system images.\n\n\
+                {stop} {tool_name} only supports {full_ota} images.\n\n\
+                {tip} Look for a larger zip (usually 2GB+) often labeled {factory} or {sideload} on OEM websites.\n",
+                header = Style::new().bold().red().apply_to("❌ Extraction Not Possible"),
+                incremental = bold_cyan.apply_to("incremental"),
+                changes = bold_yellow.apply_to("binary changes"),
+                stop = Style::new().dim().apply_to("Note:"),
+                tool_name = env!("CARGO_PKG_NAME"),
+                full_ota = bold_cyan.apply_to("Full OTA"),
+                tip = Style::new().bold().green().apply_to("📌 Tip:"),
+                factory = bold_yellow.apply_to("\"Full OTA\""),
+                sideload = bold_yellow.apply_to("\"Recovery Flashable\"")
+            );
+        }
         let block_size = manifest.block_size.context("block_size not defined")? as usize;
         ensure!(
             block_size >= 512 && block_size <= 16 * 1024 * 1024,
@@ -650,7 +680,7 @@ impl Cmd {
             MIN_BLOCK_SIZE,
             MAX_BLOCK_SIZE
         );
-
+        
         if self.list {
             manifest
                 .partitions
@@ -1244,39 +1274,45 @@ impl Cmd {
         Ok(())
     }
 
-    /// In-memory zip handling: returns a `PayloadSource` enum. If the input is a zip
-    /// file, `payload.bin` is extracted directly to memory instead of a temp file.
     fn open_payload_file(&self, path: &Path) -> Result<PayloadSource> {
-        let file = File::open(path)
-            .with_context(|| format!("unable to open file for reading: {path:?}"))?;
+    let mut file = File::open(path)
+        .with_context(|| format!("unable to open file for reading: {path:?}"))?;
 
-        // Try to parse as ZIP
-        if let Ok(mut archive) = ZipArchive::new(&file) {
-            match archive.by_name("payload.bin") {
-                Ok(mut zipfile) => {
-                    let mut buffer = Vec::with_capacity(zipfile.size() as usize);
-                    zipfile
-                        .read_to_end(&mut buffer)
-                        .context("Failed to read payload.bin from ZIP")?;
-                    return Ok(PayloadSource::Owned(buffer));
-                }
-                Err(_) => {
-                    // Valid ZIP but missing payload.bin → not a valid OTA
-                    bail!(
-                        "Error: '{}' is a valid ZIP file but does NOT contain 'payload.bin'.\n\
-                        This tool only supports Android OTA updates (must include payload.bin).",
-                        path.display()
-                    );
-                }
+    // Read magic bytes to determine file type
+    // Peeking at the first 4 bytes
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).context("Failed to read file header")?;
+    // Seek back to start so subsequent readers don't miss the header
+    file.seek(std::io::SeekFrom::Start(0))?;
+
+    // Case 1: It's a ZIP archive (PK\x03\x04)
+    if &magic == b"PK\x03\x04" {
+        let mut archive = ZipArchive::new(&file)
+            .context("File has ZIP magic but is not a valid ZIP archive")?;
+            
+        match archive.by_name("payload.bin") {
+            Ok(mut zipfile) => {
+                let mut buffer = Vec::with_capacity(zipfile.size() as usize);
+                zipfile
+                    .read_to_end(&mut buffer)
+                    .context("Failed to read payload.bin from ZIP")?;
+                return Ok(PayloadSource::Owned(buffer));
+            }
+            Err(_) => {
             }
         }
-
-        // Not a ZIP → treat as raw payload.bin
-        let mmap = unsafe { Mmap::map(&file) }
-            .with_context(|| format!("failed to mmap file: {path:?}"))?;
-        Ok(PayloadSource::Mapped(mmap))
     }
+
+    // Case 2: It's a raw payload (CrAU) or something else
+    // Use Mmap for performance (avoids loading GBs into RAM)
+    let mmap = unsafe { Mmap::map(&file) }
+        .with_context(|| format!("failed to mmap file: {path:?}"))?;
     
+    // We don't need to check CrAU here because Payload::parse(mmap) 
+    // is about to be called in run() and it handles the diagnostics perfectly!
+    
+    Ok(PayloadSource::Mapped(mmap))
+}
     fn open_partition_file(
         &self,
         update: &PartitionUpdate,
