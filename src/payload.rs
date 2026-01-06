@@ -27,7 +27,6 @@ impl<'a> Payload<'a> {
         let magic = &bytes[0..4];
 
         if magic != PAYLOAD_MAGIC {
-            // Funny diagnostics because devs deserve joy
             let mut vibe = String::new();
 
             // Windows PE / EXE
