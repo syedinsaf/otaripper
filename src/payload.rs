@@ -1,121 +1,152 @@
-use anyhow::{Context, Result, anyhow};
-use nom::{
-    bytes::complete::{tag, take},
-    combinator::rest,
-    number::complete::{be_u32, be_u64},
-    IResult,
-};
+// payload.rs
+use anyhow::{Result, anyhow, bail};
 
-/// Chrome OS update payload format parser.
-/// 
-/// Update file format: contains all the operations needed to update a system to
-/// a specific version. It can be a full payload which can update from any
-/// version, or a delta payload which can only update from a specific version.
-/// 
-/// The binary format is:
-/// - Magic bytes: "CrAU" (4 bytes)
-/// - File format version (8 bytes, big-endian)
-/// - Manifest size (8 bytes, big-endian)  
-/// - [Optional] Metadata signature size (4 bytes, big-endian, only if version >= 2)
-/// - Manifest data (variable length, protobuf serialized)
-/// - [Optional] Metadata signature (variable length, only if version >= 2)
-/// - Payload data (remaining bytes)
+const PAYLOAD_MAGIC: &[u8] = b"CrAU";
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct Payload<'a> {
-    /// Magic bytes identifier - should always be "CrAU".
-    magic_bytes: &'a [u8],
-
-    /// Major version of the payload file format.
-    file_format_version: u64,
-
-    /// Size in bytes of the manifest data that follows.
-    manifest_size: u64,
-
-    /// Size of the metadata signature in bytes.
-    /// Only present if file_format_version >= 2.
-    metadata_signature_size: Option<u32>,
-
-    /// Serialized DeltaArchiveManifest protobuf message.
-    /// Contains metadata about the update operations.
+    pub file_format_version: u64,
+    pub manifest_size: u64,
     pub manifest: &'a [u8],
-
-    /// Cryptographic signature of the metadata (magic bytes through manifest).
-    /// This is a serialized Signatures protobuf message.
-    /// Only present if file_format_version >= 2.
-    metadata_signature: Option<&'a [u8]>,
-
-    /// Raw payload data containing the actual update content.
-    /// The specific offset and length of each data blob is recorded in the manifest.
+    pub metadata_signature: Option<&'a [u8]>,
     pub data: &'a [u8],
 }
 
 impl<'a> Payload<'a> {
-    /// Internal parser implementation using nom combinators.
-    fn parse_inner(input: &'a [u8]) -> IResult<&'a [u8], Payload<'a>> {
-        // Parse magic bytes - must be exactly "CrAU"
-        let (input, magic_bytes) = tag(&b"CrAU"[..])(input)?;
-        
-        // Parse version and manifest size (both big-endian u64)
-        let (input, file_format_version) = be_u64(input)?;
-        let (input, manifest_size) = be_u64(input)?;
-       
-        // Metadata signature size only exists in version 2+
-        let (input, metadata_signature_size) = if file_format_version > 1 {
-            let (input, size) = be_u32(input)?;
-            (input, Some(size))
-        } else {
-            (input, None)
-        };
-       
-        // Parse manifest data (length determined by manifest_size)
-        let (input, manifest) = take(manifest_size)(input)?;
-       
-        // Parse optional metadata signature
-        let (input, metadata_signature) = match metadata_signature_size {
-            Some(size) => {
-                let (input, sig) = take(size)(input)?;
-                (input, Some(sig))
+    pub fn parse(bytes: &'a [u8]) -> Result<Self> {
+        // ---- Minimum header sanity ----
+        if bytes.len() < 20 {
+            bail!(
+                "Payload too short to contain base header (need at least 20 bytes, got {})",
+                bytes.len()
+            );
+        }
+
+        // ---- Magic ----
+        let magic = &bytes[0..4];
+
+        if magic != PAYLOAD_MAGIC {
+            // Funny diagnostics because devs deserve joy
+            let mut vibe = String::new();
+
+            // Windows PE / EXE
+            if magic.starts_with(b"MZ") {
+                vibe.push_str("💀 Bro… you just fed me a WINDOWS .EXE.\n");
+                vibe.push_str("What do you want me to extract? Task Manager??\n\n");
             }
-            None => (input, None),
+            // ZIP
+            else if magic == b"PK\x03\x04" || magic == b"PK\x05\x06" || magic == b"PK\x07\x08" {
+                vibe.push_str("📦 This is a ZIP… which is GREAT…\n");
+                vibe.push_str("…except it does NOT contain a valid payload.bin 😭\n\n");
+            }
+            // Linux ELF binary
+            else if magic == b"\x7FELF" {
+                vibe.push_str("🐧 This is an ELF binary.\n");
+                vibe.push_str("You have given me Linux. I cannot extract Linux. I *am* Linux (spiritually).\n\n");
+            }
+            // JPEG
+            else if magic.starts_with(b"\xFF\xD8") {
+                vibe.push_str("🖼️ Not you trying to extract… a JPEG 💀\n\n");
+            }
+            // PNG
+            else if magic.starts_with(b"\x89PNG") {
+                vibe.push_str("🖌️ This is a PNG image.\n");
+                vibe.push_str("Pixels are not partitions my friend 😔\n\n");
+            }
+
+            bail!(
+                "{}Expected OTA payload header: 'CrAU'\n\
+Found bytes: {:02X} {:02X} {:02X} {:02X}\n\n\
+👉 Valid inputs:\n  - payload.bin\n  - OTA update .zip (with payload.bin inside)\n\n\
+If unsure:\n  drag OTA.zip or payload.bin onto otaripper 😎",
+                vibe,
+                magic[0],
+                magic[1],
+                magic[2],
+                magic[3]
+            );
+        }
+
+        // ---- Version ----
+        let file_format_version = u64::from_be_bytes(
+            bytes[4..12]
+                .try_into()
+                .map_err(|_| anyhow!("Failed to read file format version"))?,
+        );
+
+        if file_format_version > 2 {
+            bail!(
+                "Unsupported payload version {} (only v1/v2 supported). Please update otaripper.",
+                file_format_version
+            );
+        }
+
+        // ---- Manifest Size ----
+        let manifest_size = u64::from_be_bytes(
+            bytes[12..20]
+                .try_into()
+                .map_err(|_| anyhow!("Failed to read manifest size"))?,
+        );
+
+        // ---- v2 signature size handling ----
+        if file_format_version >= 2 && bytes.len() < 24 {
+            bail!("Version 2 payload requires at least 24-byte header");
+        }
+
+        let metadata_sig_size_u32 = if file_format_version >= 2 {
+            u32::from_be_bytes(
+                bytes[20..24]
+                    .try_into()
+                    .map_err(|_| anyhow!("Failed to read metadata signature size"))?,
+            )
+        } else {
+            0
         };
-       
-        // Everything remaining is payload data
-        let (input, data) = rest(input)?;
-       
-        Ok((input, Payload {
-            magic_bytes,
+
+        if metadata_sig_size_u32 > 64 * 1024 * 1024 {
+            bail!(
+                "Metadata signature size {} bytes is unreasonably large",
+                metadata_sig_size_u32
+            );
+        }
+
+        let header_size: usize = if file_format_version >= 2 { 24 } else { 20 };
+
+        // ---- Manifest bounds ----
+        let manifest_start = header_size;
+        let manifest_end = manifest_start
+            .checked_add(manifest_size as usize)
+            .ok_or_else(|| anyhow!("Manifest size overflow"))?;
+
+        if manifest_end > bytes.len() {
+            bail!("Declared manifest size exceeds payload length");
+        }
+
+        // ---- Signature + Data bounds ----
+        let data_start = manifest_end
+            .checked_add(metadata_sig_size_u32 as usize)
+            .ok_or_else(|| anyhow!("Metadata signature size overflow"))?;
+
+        if data_start > bytes.len() {
+            bail!("Metadata signature extends beyond end of payload");
+        }
+
+        // ---- Final zero-copy slices ----
+        let manifest = &bytes[manifest_start..manifest_end];
+        let metadata_signature = if metadata_sig_size_u32 > 0 {
+            Some(&bytes[manifest_end..data_start])
+        } else {
+            None
+        };
+        let data = &bytes[data_start..];
+
+        Ok(Self {
             file_format_version,
             manifest_size,
-            metadata_signature_size,
             manifest,
             metadata_signature,
             data,
-        }))
-    }
-
-    /// Parse a Chrome OS update payload from raw bytes.
-    /// 
-    /// # Arguments
-    /// * `bytes` - Raw payload file data
-    /// 
-    /// # Returns
-    /// * `Ok(Payload)` - Successfully parsed payload
-    /// * `Err(anyhow::Error)` - Parse error with context
-    /// 
-    /// # Example
-    /// ```rust
-    /// let payload_data = std::fs::read("update.bin")?;
-    /// let payload = Payload::parse(&payload_data)?;
-    /// println!("Version: {}", payload.file_format_version);
-    /// ```
-    pub fn parse(bytes: &'a [u8]) -> Result<Self> {
-        match Self::parse_inner(bytes) {
-            Ok((_, payload)) => Ok(payload),
-            Err(e) => {
-                Err(anyhow!("Failed to parse payload: {}", e))
-                    .context("The payload file format is invalid or corrupted")
-            }
-        }
+        })
     }
 }
