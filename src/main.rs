@@ -1,14 +1,11 @@
-#[allow(clippy::all, dead_code)]
-mod chromeos_update_engine {
-    include!(concat!(env!("OUT_DIR"), "/chromeos_update_engine.rs"));
-}
-
-mod cmd;
-mod payload;
-
 use clap::Parser;
+use mimalloc::MiMalloc;
 
-use crate::cmd::Cmd;
+// Use MiMalloc for better performance in multi-threaded extraction
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
+use otaripper::cmd::Cmd;
 
 fn main() {
     if let Err(e) = Cmd::parse().run() {
