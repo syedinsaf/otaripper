@@ -1,7 +1,7 @@
 use crate::chromeos_update_engine::install_operation::Type;
 use crate::chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUpdate};
 use crate::payload::Payload;
-use anyhow::{bail, ensure, Context, Result};
+use anyhow::{Context, Result, bail, ensure};
 use bzip2::read::BzDecoder;
 use chrono::Local;
 use clap::{Parser, ValueHint};
@@ -28,12 +28,13 @@ use std::{env, slice};
 use zip::ZipArchive;
 
 const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64 KiB: balances cache efficiency and overhead in chunked processing
-const SIMD_THRESHOLD: usize = 1024; // 1 KiB: minimum size to justify SIMD overhead
+const SIMD_THRESHOLD: usize = 1024;         // 1 KiB: minimum size to justify SIMD overhead
 const PROGRESS_UPDATE_FREQUENCY_HIGH: u8 = 2; // 2 Hz refresh when ≤32 partitions (smooth without flicker)
-const PROGRESS_UPDATE_FREQUENCY_LOW: u8 = 1; // 1 Hz refresh when >32 partitions (prevents terminal spam)
-                                             // Android OTA payload specification limits
+const PROGRESS_UPDATE_FREQUENCY_LOW: u8 = 1;  // 1 Hz refresh when >32 partitions (prevents terminal spam)
+// Android OTA payload specification limits
 const MIN_BLOCK_SIZE: usize = 512;
 const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
+
 
 #[derive(Debug, Parser)]
 #[clap(
@@ -136,15 +137,17 @@ impl Deref for PayloadSource {
 pub struct ExtentsWriter<'a, 'b> {
     extents: &'a mut [&'b mut [u8]],
     idx: usize,
-    off: usize,
+    off: usize
 }
 impl<'a, 'b> ExtentsWriter<'a, 'b> {
     /// Create a new ExtentsWriter for writing to the given extents.
-    pub fn new(extents: &'a mut [&'b mut [u8]]) -> Self {
+    pub fn new(
+        extents: &'a mut [&'b mut [u8]],
+    ) -> Self {
         Self {
             extents,
             idx: 0,
-            off: 0,
+            off: 0
         }
     }
 
@@ -179,7 +182,10 @@ impl<'a, 'b> ExtentsWriter<'a, 'b> {
 
         // Hot path first: large copies (>= 1KB) use SIMD — this is the common case
         if to_copy >= SIMD_THRESHOLD {
-            simd_copy_large(src_slice, dest_slice);
+            simd_copy_large(
+                src_slice,
+                dest_slice,
+            );
         } else {
             dest_slice.copy_from_slice(src_slice);
         }
@@ -299,7 +305,10 @@ impl CpuSimd {
 
 /// SIMD-optimized large data copying
 #[inline]
-fn simd_copy_large(src: &[u8], dst: &mut [u8]) {
+fn simd_copy_large(
+    src: &[u8],
+    dst: &mut [u8],
+) {
     debug_assert_eq!(src.len(), dst.len());
 
     // For very large transfers, process in cache-friendly chunks
@@ -312,18 +321,27 @@ fn simd_copy_large(src: &[u8], dst: &mut [u8]) {
             let src_chunk = &src[src_offset..src_offset + chunk_size];
             let dst_chunk = &mut dst[dst_offset..dst_offset + chunk_size];
 
-            simd_copy_chunk(src_chunk, dst_chunk);
+            simd_copy_chunk(
+                src_chunk,
+                dst_chunk,
+            );
 
             src_offset += chunk_size;
             dst_offset += chunk_size;
         }
     } else {
-        simd_copy_chunk(src, dst);
+        simd_copy_chunk(
+            src,
+            dst,
+        );
     }
 }
 
 #[inline(always)]
-fn simd_copy_chunk(src: &[u8], dst: &mut [u8]) {
+fn simd_copy_chunk(
+    src: &[u8],
+    dst: &mut [u8],
+) {
     #[cfg(target_arch = "x86_64")]
     {
         match CpuSimd::get() {
@@ -397,6 +415,7 @@ unsafe fn simd_copy_avx512(src: &[u8], dst: &mut [u8]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
+
     let len = src.len();
 
     if len < 1_048_576 {
@@ -419,10 +438,10 @@ unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
         i += 64;
     }
     unsafe {
-        _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
-                      // This ensures data is globally visible before we signal
-                      // that this operation is complete.
-    }
+        _mm_sfence();   // CRITICAL: Flushes non-temporal store buffers to RAM.
+                        // This ensures data is globally visible before we signal
+                        // that this operation is complete.
+    }    
     // Tail
     if i < len {
         dst[i..].copy_from_slice(&src[i..]);
@@ -480,9 +499,9 @@ unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
     }
 
     unsafe {
-        _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
-                      // This ensures data is globally visible before we signal
-                      // that this operation is complete.
+        _mm_sfence();   // CRITICAL: Flushes non-temporal store buffers to RAM.
+                        // This ensures data is globally visible before we signal
+                        // that this operation is complete.
     }
     // Tail
     if i < len {
@@ -616,7 +635,7 @@ impl Cmd {
             ))?
             .clone();
 
-        // Proceed with the rest of the method using payload_path
+         // Proceed with the rest of the method using payload_path
         let payload = self.open_payload_file(&payload_path)?;
         // Because PayloadSource implements Deref, this call works seamlessly.
         let payload = &Payload::parse(&payload)?;
@@ -631,17 +650,6 @@ impl Cmd {
             MIN_BLOCK_SIZE,
             MAX_BLOCK_SIZE
         );
-        // REJECT INCREMENTAL (DELTA) OTAs
-        if manifest.partial_update == Some(true) ||
-        manifest.partitions.iter().any(|p| p.old_partition_info.is_some())
-        {
-            bail!(
-                "❌ Incremental OTA not supported.\n\
-                This appears to be a delta update (partial_update=true or old_partition_info present).\n\
-                otaripper only supports full OTA payloads (complete partition images).\n\
-                📌 Tip: Use a full OTA zip — incremental/delta OTAs are not supported."
-            );
-        }
 
         if self.list {
             manifest
@@ -673,8 +681,8 @@ impl Cmd {
                 bail!("partition \"{}\" not found in manifest", partition);
             }
         }
-        // Sort partitions by size (descending).
-        // Processing larger partitions first improves threadpool utilization and
+        // Sort partitions by size (descending). 
+        // Processing larger partitions first improves threadpool utilization and 
         // ensures the most time-consuming progress bars start immediately.
         manifest.partitions.sort_unstable_by_key(|partition| {
             Reverse(
@@ -802,16 +810,11 @@ impl Cmd {
                     if fs::remove_dir_all(dir).is_ok() {
                         eprintln!("Removed temporary extraction directory: {}", dir.display());
                     } else {
-                        eprintln!(
-                            "⚠️ Failed to remove extraction directory: {}",
-                            dir.display()
-                        );
+                        eprintln!("⚠️ Failed to remove extraction directory: {}", dir.display());
                     }
                 }
             } else {
-                eprintln!(
-                    "⚠️ Warning: Could not acquire cleanup lock (likely due to a thread panic)."
-                );
+                eprintln!("⚠️ Warning: Could not acquire cleanup lock (likely due to a thread panic).");
                 eprintln!("   Please manually check your output directory for partial files.");
             }
 
@@ -1143,51 +1146,50 @@ impl Cmd {
     /// # Safety
     /// This function is the core of otaripper's high-performance extraction.
     /// It is sound because:
-    /// 1. `base_ptr` is guaranteed to be valid for `partition_len` as long as the
+    /// 1. `base_ptr` is guaranteed to be valid for `partition_len` as long as the 
     ///    `partition_file` Mmap is alive.
-    /// 2. Scoped threads (`rayon::scope`) ensure that worker threads cannot outlive
+    /// 2. Scoped threads (`rayon::scope`) ensure that worker threads cannot outlive 
     ///     the `Mmap` lifetime.
-    /// 3. `validate_non_overlapping_extents` proves that no two threads can receive
+    /// 3. `validate_non_overlapping_extents` proves that no two threads can receive 
     ///    the same memory range, preventing data races and mutable aliasing UB.
     fn run_op_raw(
-        &self,
-        op: &InstallOperation,
-        payload: &Payload,
-        base_ptr: *mut u8,
-        partition_len: usize,
-        block_size: usize,
-    ) -> Result<()> {
-        let raw_extents = self.extract_dst_extents_raw(op, base_ptr, partition_len, block_size)?;
+    &self,
+    op: &InstallOperation,
+    payload: &Payload,
+    base_ptr: *mut u8,
+    partition_len: usize,
+    block_size: usize
+) -> Result<()> {
+    let raw_extents = self.extract_dst_extents_raw(op, base_ptr, partition_len, block_size)?;
+    
+    // Convert to temporary &mut [u8] — safe because:
+    // - Extents are non-overlapping (validated globally)
+    // - No other thread writes to these exact byte ranges
+    // - These slices are NOT derived from a shared RwLock guard
+    let mut dst_extents: Vec<&mut [u8]> = raw_extents
+        .into_iter()
+        .map(|(ptr, len)| unsafe { slice::from_raw_parts_mut(ptr, len) })
+        .collect();
 
-        // Convert to temporary &mut [u8] — safe because:
-        // - Extents are non-overlapping (validated globally)
-        // - No other thread writes to these exact byte ranges
-        // - These slices are NOT derived from a shared RwLock guard
-        let mut dst_extents: Vec<&mut [u8]> = raw_extents
-            .into_iter()
-            .map(|(ptr, len)| unsafe { slice::from_raw_parts_mut(ptr, len) })
-            .collect();
-
-        // Now delegate to existing logic
-        match Type::try_from(op.r#type)? {
-            Type::Replace => {
-                let data = self.extract_data(op, payload)?;
-                self.run_op_replace_slice(data, &mut dst_extents, block_size)
-            }
-            Type::ReplaceBz => {
-                let data = self.extract_data(op, payload)?;
-                let mut decoder = BzDecoder::new(data);
-                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
-            }
-            Type::ReplaceXz => {
-                let data = self.extract_data(op, payload)?;
-                let mut decoder = xz2::read::XzDecoder::new(data);
-                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
-            }
-            Type::Zero | Type::Discard => Ok(()),
-            _ => bail!("Unsupported operation type"),
+    // Now delegate to existing logic
+    match Type::try_from(op.r#type)? {
+        Type::Replace => {
+            let data = self.extract_data(op, payload)?;
+            self.run_op_replace_slice(data, &mut dst_extents, block_size)
         }
+        Type::ReplaceBz => {
+            let data = self.extract_data(op, payload)?;
+            let mut decoder = BzDecoder::new(data);
+            self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
+        }
+        Type::ReplaceXz => {
+            let data = self.extract_data(op, payload)?;
+            let mut decoder = xz2::read::XzDecoder::new(data);
+            self.run_op_replace(&mut decoder, &mut dst_extents, block_size)        }
+        Type::Zero | Type::Discard => Ok(()),
+        _ => bail!("Unsupported operation type"),
     }
+}
 
     fn run_op_replace(
         &self,
@@ -1196,8 +1198,13 @@ impl Cmd {
         block_size: usize,
     ) -> Result<()> {
         let dst_len = dst_extents.iter().map(|e| e.len()).sum::<usize>();
-        let bytes_read = io::copy(reader, &mut ExtentsWriter::new(dst_extents))
-            .context("failed to write to buffer")? as usize;
+        let bytes_read = io::copy(
+            reader,
+            &mut ExtentsWriter::new(
+                dst_extents
+            ),
+        )
+        .context("failed to write to buffer")? as usize;
         let bytes_read_aligned = bytes_read
             .saturating_add(block_size.saturating_sub(1))
             .saturating_div(block_size)
@@ -1225,9 +1232,11 @@ impl Cmd {
             bytes_read_aligned == dst_len,
             "more dst blocks than data, even with padding"
         );
-        let written = ExtentsWriter::new(dst_extents)
-            .write(data)
-            .context("failed to write to buffer")?;
+        let written = ExtentsWriter::new(
+            dst_extents
+        )
+        .write(data)
+        .context("failed to write to buffer")?;
         ensure!(
             written == bytes_read,
             "failed to write all data to destination extents"
@@ -1235,7 +1244,7 @@ impl Cmd {
         Ok(())
     }
 
-   /// In-memory zip handling: returns a `PayloadSource` enum. If the input is a zip
+    /// In-memory zip handling: returns a `PayloadSource` enum. If the input is a zip
     /// file, `payload.bin` is extracted directly to memory instead of a temp file.
     fn open_payload_file(&self, path: &Path) -> Result<PayloadSource> {
         let file = File::open(path)
@@ -1255,8 +1264,7 @@ impl Cmd {
                     // Valid ZIP but missing payload.bin → not a valid OTA
                     bail!(
                         "Error: '{}' is a valid ZIP file but does NOT contain 'payload.bin'.\n\
-                        This tool only supports Android OTA updates (must include payload.bin). \n\
-                        📌 Tip: Ensure you're using a full OTA zip — incremental/delta OTAs are not supported.",
+                        This tool only supports Android OTA updates (must include payload.bin).",
                         path.display()
                     );
                 }
@@ -1268,7 +1276,7 @@ impl Cmd {
             .with_context(|| format!("failed to mmap file: {path:?}"))?;
         Ok(PayloadSource::Mapped(mmap))
     }
-
+    
     fn open_partition_file(
         &self,
         update: &PartitionUpdate,
