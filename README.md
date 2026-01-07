@@ -91,7 +91,7 @@ Partition            Size             Type
 boot                 64.00 MiB        Full (Verified)
 system_a             2.45 GiB         Full (Verified)
 vendor               512.12 MiB       Incremental (Patch)
-
+```
 
 ### Common Workflows
 
