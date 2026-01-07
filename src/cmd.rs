@@ -12,7 +12,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressFinish, 
 use memmap2::{Mmap, MmapMut};
 use prost::Message;
 use rayon::{ThreadPool, ThreadPoolBuilder};
-use sha2::{Digest, Sha256};
+use ring::digest::{SHA256, digest};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 use std::cmp::Reverse;
@@ -1068,11 +1068,13 @@ impl Cmd {
                             // 3) Print SHA-256 if requested — reuse verified digest to avoid redundant work
                             if let Some(sender) = hash_sender.as_ref() {
                                 let digest = if let Some(d) = computed_digest_opt {
-                                    d // Already computed during verification (full image)
+                                    d
                                 } else {
-                                    let hash_array = Sha256::digest(final_slice);
-                                    hash_array.into()
-                                };
+                                    let d = digest(&SHA256, final_slice);
+                                        let mut arr = [0u8; 32];
+                                        arr.copy_from_slice(d.as_ref());
+                                        arr
+                                    };
                                 let hexstr = hex::encode(digest);
                                 let _ = sender.send(HashRec { order: part_index, name: part_name.clone(), hex: hexstr });
                             }
@@ -1457,17 +1459,16 @@ impl Cmd {
     }
     // Same as verify_sha256, but returns the computed digest on success so it can be reused.
     fn verify_sha256_returning(&self, data: &[u8], exp_hash: &[u8]) -> Result<[u8; 32]> {
-        let got_hash = Sha256::digest(data);
+        let got = digest(&SHA256, data);
         ensure!(
-            got_hash.as_slice() == exp_hash,
+            got.as_ref() == exp_hash,
             "hash mismatch: expected {}, got {}",
             hex::encode(exp_hash),
-            hex::encode(got_hash.as_slice())
+            hex::encode(got.as_ref())
         );
-        Ok(got_hash
-            .as_slice()
-            .try_into()
-            .expect("sha256 digest must be 32 bytes"))
+        let mut out = [0u8; 32];
+        out.copy_from_slice(got.as_ref());
+        Ok(out)
     }
 
     fn verify_sha256(&self, data: &[u8], exp_hash: &[u8]) -> Result<()> {
