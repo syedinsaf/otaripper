@@ -17,23 +17,24 @@ use sha2::{Digest, Sha256};
 use std::arch::x86_64::*;
 use std::cmp::Reverse;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write, Seek};
+use std::io::{self, Read, Seek, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use std::{env, slice};
+use sysinfo::{MemoryRefreshKind, RefreshKind};
+use tempfile::NamedTempFile;
 use zip::ZipArchive;
 
 const OPTIMAL_CHUNK_SIZE: usize = 64 * 1024; // 64 KiB: balances cache efficiency and overhead in chunked processing
-const SIMD_THRESHOLD: usize = 1024;         // 1 KiB: minimum size to justify SIMD overhead
+const SIMD_THRESHOLD: usize = 1024; // 1 KiB: minimum size to justify SIMD overhead
 const PROGRESS_UPDATE_FREQUENCY_HIGH: u8 = 2; // 2 Hz refresh when ≤32 partitions (smooth without flicker)
-const PROGRESS_UPDATE_FREQUENCY_LOW: u8 = 1;  // 1 Hz refresh when >32 partitions (prevents terminal spam)
+const PROGRESS_UPDATE_FREQUENCY_LOW: u8 = 1; // 1 Hz refresh when >32 partitions (prevents terminal spam)
 // Android OTA payload specification limits
 const MIN_BLOCK_SIZE: usize = 512;
 const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
-
 
 #[derive(Debug, Parser)]
 #[clap(
@@ -119,15 +120,16 @@ pub struct Cmd {
 pub enum PayloadSource {
     Mapped(Mmap),
     Owned(Vec<u8>),
+    Temp(Mmap, NamedTempFile),
 }
 
 impl Deref for PayloadSource {
     type Target = [u8];
-
     fn deref(&self) -> &Self::Target {
         match self {
             PayloadSource::Mapped(mmap) => mmap,
             PayloadSource::Owned(vec) => vec,
+            PayloadSource::Temp(mmap, _) => mmap,
         }
     }
 }
@@ -136,17 +138,15 @@ impl Deref for PayloadSource {
 pub struct ExtentsWriter<'a, 'b> {
     extents: &'a mut [&'b mut [u8]],
     idx: usize,
-    off: usize
+    off: usize,
 }
 impl<'a, 'b> ExtentsWriter<'a, 'b> {
     /// Create a new ExtentsWriter for writing to the given extents.
-    pub fn new(
-        extents: &'a mut [&'b mut [u8]],
-    ) -> Self {
+    pub fn new(extents: &'a mut [&'b mut [u8]]) -> Self {
         Self {
             extents,
             idx: 0,
-            off: 0
+            off: 0,
         }
     }
 
@@ -181,10 +181,7 @@ impl<'a, 'b> ExtentsWriter<'a, 'b> {
 
         // Hot path first: large copies (>= 1KB) use SIMD — this is the common case
         if to_copy >= SIMD_THRESHOLD {
-            simd_copy_large(
-                src_slice,
-                dest_slice,
-            );
+            simd_copy_large(src_slice, dest_slice);
         } else {
             dest_slice.copy_from_slice(src_slice);
         }
@@ -304,10 +301,7 @@ impl CpuSimd {
 
 /// SIMD-optimized large data copying
 #[inline]
-fn simd_copy_large(
-    src: &[u8],
-    dst: &mut [u8],
-) {
+fn simd_copy_large(src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
 
     // For very large transfers, process in cache-friendly chunks
@@ -320,27 +314,18 @@ fn simd_copy_large(
             let src_chunk = &src[src_offset..src_offset + chunk_size];
             let dst_chunk = &mut dst[dst_offset..dst_offset + chunk_size];
 
-            simd_copy_chunk(
-                src_chunk,
-                dst_chunk,
-            );
+            simd_copy_chunk(src_chunk, dst_chunk);
 
             src_offset += chunk_size;
             dst_offset += chunk_size;
         }
     } else {
-        simd_copy_chunk(
-            src,
-            dst,
-        );
+        simd_copy_chunk(src, dst);
     }
 }
 
 #[inline(always)]
-fn simd_copy_chunk(
-    src: &[u8],
-    dst: &mut [u8],
-) {
+fn simd_copy_chunk(src: &[u8], dst: &mut [u8]) {
     #[cfg(target_arch = "x86_64")]
     {
         match CpuSimd::get() {
@@ -414,7 +399,6 @@ unsafe fn simd_copy_avx512(src: &[u8], dst: &mut [u8]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
-
     let len = src.len();
 
     if len < 1_048_576 {
@@ -437,10 +421,10 @@ unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
         i += 64;
     }
     unsafe {
-        _mm_sfence();   // CRITICAL: Flushes non-temporal store buffers to RAM.
-                        // This ensures data is globally visible before we signal
-                        // that this operation is complete.
-    }    
+        _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
+        // This ensures data is globally visible before we signal
+        // that this operation is complete.
+    }
     // Tail
     if i < len {
         dst[i..].copy_from_slice(&src[i..]);
@@ -498,9 +482,9 @@ unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
     }
 
     unsafe {
-        _mm_sfence();   // CRITICAL: Flushes non-temporal store buffers to RAM.
-                        // This ensures data is globally visible before we signal
-                        // that this operation is complete.
+        _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
+        // This ensures data is globally visible before we signal
+        // that this operation is complete.
     }
     // Tail
     if i < len {
@@ -634,7 +618,7 @@ impl Cmd {
             ))?
             .clone();
 
-         // Proceed with the rest of the method using payload_path
+        // Proceed with the rest of the method using payload_path
         let payload = self.open_payload_file(&payload_path)?;
         // Because PayloadSource implements Deref, this call works seamlessly.
         let payload = &Payload::parse(&payload)?;
@@ -642,17 +626,22 @@ impl Cmd {
         let mut manifest =
             DeltaArchiveManifest::decode(payload.manifest).context("unable to parse manifest")?;
 
-        // 1. Identify if the payload contains any incremental operations    
+        // 1. Identify if the payload contains any incremental operations
         let has_incremental_ops = manifest.partitions.iter().any(|p| {
             p.operations.iter().any(|op| {
                 matches!(
                     Type::try_from(op.r#type),
-                    Ok(Type::SourceCopy | Type::SourceBsdiff | Type::BrotliBsdiff | Type::Puffdiff | Type::Zucchini)
+                    Ok(Type::SourceCopy
+                        | Type::SourceBsdiff
+                        | Type::BrotliBsdiff
+                        | Type::Puffdiff
+                        | Type::Zucchini)
                 )
             })
         });
-        let block_size = manifest.block_size
-            .context("The update file is missing critical metadata (block_size). It is likely corrupted.")? as usize; 
+        let block_size = manifest.block_size.context(
+            "The update file is missing critical metadata (block_size). It is likely corrupted.",
+        )? as usize;
         ensure!(
             (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size),
             "The update file has an invalid internal structure (block size {} is unsupported). It may be corrupted.",
@@ -664,7 +653,7 @@ impl Cmd {
             manifest
                 .partitions
                 .sort_unstable_by(|p1, p2| p1.partition_name.cmp(&p2.partition_name));
-            
+
             println!("{:<20} {:<16} {:<10}", "Partition", "Size", "Type");
             println!("{:-<46}", "");
 
@@ -680,7 +669,11 @@ impl Cmd {
                 let is_patch = partition.operations.iter().any(|op| {
                     matches!(
                         Type::try_from(op.r#type),
-                        Ok(Type::SourceCopy | Type::SourceBsdiff | Type::BrotliBsdiff | Type::Puffdiff | Type::Zucchini)
+                        Ok(Type::SourceCopy
+                            | Type::SourceBsdiff
+                            | Type::BrotliBsdiff
+                            | Type::Puffdiff
+                            | Type::Zucchini)
                     )
                 });
 
@@ -705,14 +698,17 @@ impl Cmd {
         if has_incremental_ops {
             let bold_cyan = Style::new().bold().cyan();
             let bold_yellow = Style::new().bold().yellow();
-            
+
             bail!(
                 "\n{header}\n\n\
                 This file is an {incremental} update (patch). It only contains the {changes} \
                 made between two versions, not the full system images.\n\n\
                 {stop} {tool_name} only supports {full_ota} images.\n\n\
                 {tip} Look for a larger zip (usually 2GB+) often labeled {factory} or {sideload} on OEM websites.\n",
-                header = Style::new().bold().red().apply_to("❌ Extraction Not Possible"),
+                header = Style::new()
+                    .bold()
+                    .red()
+                    .apply_to("❌ Extraction Not Possible"),
                 incremental = bold_cyan.apply_to("incremental"),
                 changes = bold_yellow.apply_to("binary changes"),
                 stop = Style::new().dim().apply_to("Note:"),
@@ -723,7 +719,7 @@ impl Cmd {
                 sideload = bold_yellow.apply_to("\"Recovery Flashable\"")
             );
         }
-        
+
         // 4. Continue with extraction setup...
         for partition in &self.partitions {
             if !manifest
@@ -734,8 +730,8 @@ impl Cmd {
                 bail!("partition \"{}\" not found in manifest", partition);
             }
         }
-        // Sort partitions by size (descending). 
-        // Processing larger partitions first improves threadpool utilization and 
+        // Sort partitions by size (descending).
+        // Processing larger partitions first improves threadpool utilization and
         // ensures the most time-consuming progress bars start immediately.
         manifest.partitions.sort_unstable_by_key(|partition| {
             Reverse(
@@ -862,11 +858,16 @@ impl Cmd {
                     if fs::remove_dir_all(dir).is_ok() {
                         eprintln!("Removed temporary extraction directory: {}", dir.display());
                     } else {
-                        eprintln!("⚠️ Failed to remove extraction directory: {}", dir.display());
+                        eprintln!(
+                            "⚠️ Failed to remove extraction directory: {}",
+                            dir.display()
+                        );
                     }
                 }
             } else {
-                eprintln!("⚠️ Warning: Could not acquire cleanup lock (likely due to a thread panic).");
+                eprintln!(
+                    "⚠️ Warning: Could not acquire cleanup lock (likely due to a thread panic)."
+                );
                 eprintln!("   Please manually check your output directory for partial files.");
             }
 
@@ -898,15 +899,15 @@ impl Cmd {
         }));
 
         // Inform the user about effective concurrency when -t/--threads is provided
-        if let Some(t) = self.threads 
-            && t > 0 
-            {
-                eprintln!(
-                    "Using {} worker thread(s)",
-                    threadpool.current_num_threads()
-                );
-            }
-        
+        if let Some(t) = self.threads
+            && t > 0
+        {
+            eprintln!(
+                "Using {} worker thread(s)",
+                threadpool.current_num_threads()
+            );
+        }
+
         let bold_bright_red = Style::new().bold().red();
         let bold_yellow = Style::new().bold().yellow();
         let bold_bright_green = Style::new().bold().green();
@@ -961,7 +962,7 @@ impl Cmd {
                 let hash_sender = hash_sender.clone();
 
                 let remaining_ops = Arc::new(AtomicUsize::new(update.operations.len()));
-              
+
                 for op in update.operations.iter() {
                     let progress_bar = progress_bar.clone();
                     let partition_file = Arc::clone(&partition_file);
@@ -1003,14 +1004,14 @@ impl Cmd {
                             }
                         }
                         if remaining_ops.fetch_sub(1, Ordering::AcqRel) == 1 {
-                            // VERIFICATION PHASE: Exclusive access via write lock ensures all 
+                            // VERIFICATION PHASE: Exclusive access via write lock ensures all
                             // hardware store-buffers are synchronized and visible.
-                        
+
 
 
                             let mmap_guard = partition_file.write().expect("RwLock poisoned");
                             let final_slice: &[u8] = &mmap_guard;
-                            
+
 
                             // 1) Verification when enabled and hash provided
                             let mut computed_digest_opt: Option<[u8; 32]> = None;
@@ -1018,7 +1019,7 @@ impl Cmd {
                                 if let Some(hash) = update
                                     .new_partition_info
                                     .as_ref()
-                                    .and_then(|info| info.hash.as_ref())    
+                                    .and_then(|info| info.hash.as_ref())
                                 {
                                     match self.verify_sha256_returning(final_slice, hash) {
                                         Ok(d) => computed_digest_opt = Some(d),
@@ -1042,7 +1043,7 @@ impl Cmd {
                                     return;
                                 }
                             }
-                            
+
 
                             // Check cancellation before continuing
                             if cancellation_token.load(Ordering::Acquire) {
@@ -1069,7 +1070,7 @@ impl Cmd {
                                 let digest = if let Some(d) = computed_digest_opt {
                                     d // Already computed during verification (full image)
                                 } else {
-                                    let hash_array = Sha256::digest(final_slice); 
+                                    let hash_array = Sha256::digest(final_slice);
                                     hash_array.into()
                                 };
                                 let hexstr = hex::encode(digest);
@@ -1198,50 +1199,51 @@ impl Cmd {
     /// # Safety
     /// This function is the core of otaripper's high-performance extraction.
     /// It is sound because:
-    /// 1.`base_ptr` is guaranteed to be valid for `partition_len` as long as the 
+    /// 1.`base_ptr` is guaranteed to be valid for `partition_len` as long as the
     ///   `partition_file` Mmap is alive.
-    /// 2. Scoped threads (`rayon::scope`) ensure that worker threads cannot outlive 
+    /// 2. Scoped threads (`rayon::scope`) ensure that worker threads cannot outlive
     ///   the `Mmap` lifetime.
-    /// 3. `validate_non_overlapping_extents` proves that no two threads can receive 
+    /// 3. `validate_non_overlapping_extents` proves that no two threads can receive
     ///   the same memory range, preventing data races and mutable aliasing UB.
     fn run_op_raw(
-    &self,
-    op: &InstallOperation,
-    payload: &Payload,
-    base_ptr: *mut u8,
-    partition_len: usize,
-    block_size: usize
-) -> Result<()> {
-    let raw_extents = self.extract_dst_extents_raw(op, base_ptr, partition_len, block_size)?;
-    
-    // Convert to temporary &mut [u8] — safe because:
-    // - Extents are non-overlapping (validated globally)
-    // - No other thread writes to these exact byte ranges
-    // - These slices are NOT derived from a shared RwLock guard
-    let mut dst_extents: Vec<&mut [u8]> = raw_extents
-        .into_iter()
-        .map(|(ptr, len)| unsafe { slice::from_raw_parts_mut(ptr, len) })
-        .collect();
+        &self,
+        op: &InstallOperation,
+        payload: &Payload,
+        base_ptr: *mut u8,
+        partition_len: usize,
+        block_size: usize,
+    ) -> Result<()> {
+        let raw_extents = self.extract_dst_extents_raw(op, base_ptr, partition_len, block_size)?;
 
-    // Now delegate to existing logic
-    match Type::try_from(op.r#type)? {
-        Type::Replace => {
-            let data = self.extract_data(op, payload)?;
-            self.run_op_replace_slice(data, &mut dst_extents, block_size)
+        // Convert to temporary &mut [u8] — safe because:
+        // - Extents are non-overlapping (validated globally)
+        // - No other thread writes to these exact byte ranges
+        // - These slices are NOT derived from a shared RwLock guard
+        let mut dst_extents: Vec<&mut [u8]> = raw_extents
+            .into_iter()
+            .map(|(ptr, len)| unsafe { slice::from_raw_parts_mut(ptr, len) })
+            .collect();
+
+        // Now delegate to existing logic
+        match Type::try_from(op.r#type)? {
+            Type::Replace => {
+                let data = self.extract_data(op, payload)?;
+                self.run_op_replace_slice(data, &mut dst_extents, block_size)
+            }
+            Type::ReplaceBz => {
+                let data = self.extract_data(op, payload)?;
+                let mut decoder = BzDecoder::new(data);
+                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
+            }
+            Type::ReplaceXz => {
+                let data = self.extract_data(op, payload)?;
+                let mut decoder = xz2::read::XzDecoder::new(data);
+                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
+            }
+            Type::Zero | Type::Discard => Ok(()),
+            _ => bail!("Unsupported operation type"),
         }
-        Type::ReplaceBz => {
-            let data = self.extract_data(op, payload)?;
-            let mut decoder = BzDecoder::new(data);
-            self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
-        }
-        Type::ReplaceXz => {
-            let data = self.extract_data(op, payload)?;
-            let mut decoder = xz2::read::XzDecoder::new(data);
-            self.run_op_replace(&mut decoder, &mut dst_extents, block_size)        }
-        Type::Zero | Type::Discard => Ok(()),
-        _ => bail!("Unsupported operation type"),
     }
-}
 
     fn run_op_replace(
         &self,
@@ -1250,13 +1252,8 @@ impl Cmd {
         block_size: usize,
     ) -> Result<()> {
         let dst_len = dst_extents.iter().map(|e| e.len()).sum::<usize>();
-        let bytes_read = io::copy(
-            reader,
-            &mut ExtentsWriter::new(
-                dst_extents
-            ),
-        )
-        .context("failed to write to buffer")? as usize;
+        let bytes_read = io::copy(reader, &mut ExtentsWriter::new(dst_extents))
+            .context("failed to write to buffer")? as usize;
         let bytes_read_aligned = bytes_read
             .saturating_add(block_size.saturating_sub(1))
             .saturating_div(block_size)
@@ -1284,11 +1281,9 @@ impl Cmd {
             bytes_read_aligned == dst_len,
             "more dst blocks than data, even with padding"
         );
-        let written = ExtentsWriter::new(
-            dst_extents
-        )
-        .write(data)
-        .context("failed to write to buffer")?;
+        let written = ExtentsWriter::new(dst_extents)
+            .write(data)
+            .context("failed to write to buffer")?;
         ensure!(
             written == bytes_read,
             "failed to write all data to destination extents"
@@ -1297,40 +1292,79 @@ impl Cmd {
     }
 
     fn open_payload_file(&self, path: &Path) -> Result<PayloadSource> {
-    let mut file = File::open(path)
-        .with_context(|| format!("unable to open file for reading: {path:?}"))?;
+        use sysinfo::System;
+        use tempfile::NamedTempFile;
 
-    // Read magic bytes to determine file type
-    // Peeking at the first 4 bytes
-    let mut magic = [0u8; 4];
-    file.read_exact(&mut magic).context("Failed to read file header")?;
-    // Seek back to start so subsequent readers don't miss the header
-    file.seek(std::io::SeekFrom::Start(0))?;
+        // 1. Open the file and peek magic bytes to identify format
+        let mut file = File::open(path)
+            .with_context(|| format!("unable to open file for reading: {path:?}"))?;
 
-    // Case 1: It's a ZIP archive (PK\x03\x04)
-    if &magic == b"PK\x03\x04" {
-        let mut archive = ZipArchive::new(&file)
-            .context("File has ZIP magic but is not a valid ZIP archive")?;
-            
-        if let Ok(mut zipfile) = archive.by_name("payload.bin") {
-            let mut buffer = Vec::with_capacity(zipfile.size() as usize);
-            zipfile
-                .read_to_end(&mut buffer)
-                .context("Failed to read payload.bin from ZIP")?;
-            return Ok(PayloadSource::Owned(buffer));
+        let mut magic = [0u8; 4];
+        file.read_exact(&mut magic)
+            .context("Failed to read file header")?;
+        file.seek(std::io::SeekFrom::Start(0))?;
+
+        // 2. CASE: ZIP archive (PK\x03\x04)
+        if &magic == b"PK\x03\x04" {
+            let mut archive = ZipArchive::new(&file)
+                .context("File has ZIP magic but is not a valid ZIP archive")?;
+
+            if let Ok(mut zipfile) = archive.by_name("payload.bin") {
+                let payload_size = zipfile.size();
+
+                // LIGHTWEIGHT RAM CHECK: Only refresh memory stats to minimize overhead
+                let mut sys = System::new_with_specifics(
+                    RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
+                );
+                sys.refresh_memory();
+                let available_ram = sys.available_memory();
+
+                // HEURISTIC: Use temp file if payload > 50% available RAM to avoid OOM or Swap lag
+                if payload_size > available_ram / 2 {
+                    eprintln!(
+                        "⚠️ Large payload detected ({}). Available RAM: {}. Using localized temp file for safety.",
+                        indicatif::HumanBytes(payload_size),
+                        indicatif::HumanBytes(available_ram)
+                    );
+
+                    // LOCALIZED TEMP: Create in output dir to prevent cross-partition copy performance hits
+                    let temp_file = if let Some(ref out_dir) = self.output_dir {
+                        fs::create_dir_all(out_dir)?;
+                        NamedTempFile::new_in(out_dir)
+                    } else {
+                        NamedTempFile::new()
+                    }
+                    .context("Failed to create temporary file for payload extraction")?;
+
+                    // Stream directly from ZIP to Disk
+                    io::copy(&mut zipfile, &mut temp_file.as_file())
+                        .context("Failed to stream payload.bin from ZIP to disk")?;
+
+                    // SYNC: Ensure data is physically committed before mapping for correctness
+                    temp_file.as_file().sync_all()?;
+
+                    let mmap = unsafe { Mmap::map(temp_file.as_file()) }
+                        .context("Failed to mmap streamed payload")?;
+
+                    return Ok(PayloadSource::Temp(mmap, temp_file));
+                }
+
+                // RAM PATH: Small enough to fit comfortably in memory
+                let mut buffer = Vec::with_capacity(payload_size as usize);
+                zipfile
+                    .read_to_end(&mut buffer)
+                    .context("Failed to read payload.bin from ZIP into RAM")?;
+                return Ok(PayloadSource::Owned(buffer));
+            }
         }
+
+        // 3. CASE: Raw payload.bin (Zero-copy mapping)
+        let mmap = unsafe { Mmap::map(&file) }
+            .with_context(|| format!("failed to mmap raw payload file: {path:?}"))?;
+
+        Ok(PayloadSource::Mapped(mmap))
     }
 
-    // Case 2: It's a raw payload (CrAU) or something else
-    // Use Mmap for performance (avoids loading GBs into RAM)
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("failed to mmap file: {path:?}"))?;
-    
-    // We don't need to check CrAU here because Payload::parse(mmap) 
-    // is about to be called in run() and it handles the diagnostics perfectly!
-    
-    Ok(PayloadSource::Mapped(mmap))
-}
     fn open_partition_file(
         &self,
         update: &PartitionUpdate,
@@ -1378,10 +1412,11 @@ impl Cmd {
         let data = &payload.data[offset..end_offset];
 
         if !self.no_verify
-            && let Some(hash) = &op.data_sha256_hash {
-                self.verify_sha256(data, hash)
-                    .context("input verification failed")?;
-            }
+            && let Some(hash) = &op.data_sha256_hash
+        {
+            self.verify_sha256(data, hash)
+                .context("input verification failed")?;
+        }
         Ok(data)
     }
 
@@ -1491,9 +1526,10 @@ impl Cmd {
     fn get_threadpool(&self) -> Result<ThreadPool> {
         let mut builder = ThreadPoolBuilder::new();
         if let Some(t) = self.threads
-            && t > 0 {
-                builder = builder.num_threads(t);
-            }
+            && t > 0
+        {
+            builder = builder.num_threads(t);
+        }
         builder.build().context("unable to start threadpool")
     }
 
