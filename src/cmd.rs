@@ -21,7 +21,7 @@ use std::io::{self, Read, Seek, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{env, slice};
 use sysinfo::{MemoryRefreshKind, RefreshKind};
@@ -981,8 +981,7 @@ impl Cmd {
                         let result = {
                             // We drop the ReadGuard immediately to avoid any reference aliasing.
                             let (base_ptr, partition_len) = {
-                                let mmap_guard = partition_file.read().expect("RwLock poisoned");
-                                let slice: &[u8] = &mmap_guard;
+                                let slice: &[u8] = &partition_file;
                                 (slice.as_ptr() as *mut u8, slice.len())
                             };
 
@@ -1009,8 +1008,8 @@ impl Cmd {
 
 
 
-                            let mmap_guard = partition_file.write().expect("RwLock poisoned");
-                            let final_slice: &[u8] = &mmap_guard;
+                            let final_slice: &[u8] = &partition_file;
+
 
 
                             // 1) Verification when enabled and hash provided
@@ -1371,7 +1370,7 @@ impl Cmd {
         &self,
         update: &PartitionUpdate,
         partition_dir: impl AsRef<Path>,
-    ) -> Result<(Arc<RwLock<MmapMut>>, usize, PathBuf)> {
+    ) -> Result<(Arc<MmapMut>, usize, PathBuf)> {
         let partition_len = update
             .new_partition_info
             .as_ref()
@@ -1392,7 +1391,7 @@ impl Cmd {
             unsafe { MmapMut::map_mut(&file) }
                 .with_context(|| format!("failed to mmap file: {path:?}"))?
         };
-        let partition = Arc::new(RwLock::new(mmap));
+        let partition = Arc::new(mmap);
         Ok((partition, partition_len as usize, path))
     }
 
@@ -1666,3 +1665,809 @@ const FRIENDLY_HELP: &str = color_print::cstr!(
 <bold>PROJECT</bold>: <blue>https://github.com/syedinsaf/otaripper</blue>
 {after-help}"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::chromeos_update_engine::Extent;
+    use rayon::ThreadPoolBuilder;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Helper to create a Cmd for testing
+    fn test_cmd() -> Cmd {
+        Cmd {
+            payload: None,
+            list: false,
+            threads: None,
+            output_dir: None,
+            partitions: vec![],
+            no_verify: false,
+            strict: false,
+            print_hash: false,
+            sanity: false,
+            stats: false,
+            no_open_folder: false,
+            positional_payload: None,
+        }
+    }
+
+    // Test helper to create mock InstallOperation with extents
+    fn mock_operation(extents: Vec<(u64, u64)>) -> InstallOperation {
+        InstallOperation {
+            dst_extents: extents
+                .into_iter()
+                .map(|(start, num)| Extent {
+                    start_block: Some(start),
+                    num_blocks: Some(num),
+                })
+                .collect(),
+            r#type: 0,
+            data_offset: Some(0),
+            data_length: Some(0),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_non_overlapping_valid_cases() {
+        let cmd = test_cmd();
+
+        // Case 1: Completely separate extents
+        let ops = vec![
+            mock_operation(vec![(0, 10)]),
+            mock_operation(vec![(20, 10)]),
+            mock_operation(vec![(40, 10)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Case 2: Adjacent extents (touching but not overlapping)
+        let ops = vec![
+            mock_operation(vec![(0, 10)]),
+            mock_operation(vec![(10, 10)]),
+            mock_operation(vec![(20, 10)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Case 3: Multiple extents per operation, no overlaps
+        let ops = vec![
+            mock_operation(vec![(0, 5), (10, 5)]),
+            mock_operation(vec![(20, 5), (30, 5)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Case 4: Out of order input (should be sorted internally)
+        let ops = vec![
+            mock_operation(vec![(40, 10)]),
+            mock_operation(vec![(0, 10)]),
+            mock_operation(vec![(20, 10)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+    }
+
+    #[test]
+    fn test_overlapping_invalid_cases() {
+        let cmd = test_cmd();
+
+        // Case 1: Complete overlap
+        let ops = vec![mock_operation(vec![(0, 10)]), mock_operation(vec![(5, 5)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+
+        // Case 2: Partial overlap
+        let ops = vec![mock_operation(vec![(0, 10)]), mock_operation(vec![(5, 10)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+
+        // Case 3: Multiple operations with one overlap
+        let ops = vec![
+            mock_operation(vec![(0, 10)]),
+            mock_operation(vec![(20, 10)]),
+            mock_operation(vec![(25, 10)]), // Overlaps with previous
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+
+        // Case 4: Same extent in two operations
+        let ops = vec![
+            mock_operation(vec![(10, 10)]),
+            mock_operation(vec![(10, 10)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let cmd = test_cmd();
+
+        // Case 1: Zero-length extent (should be valid, writes nothing)
+        let ops = vec![mock_operation(vec![(0, 0)]), mock_operation(vec![(0, 10)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Case 2: Single operation with multiple non-overlapping extents
+        let ops = vec![mock_operation(vec![(0, 10), (20, 10), (40, 10)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Case 3: Single operation with overlapping extents (invalid)
+        let ops = vec![mock_operation(vec![(0, 10), (5, 10)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+
+        // Case 4: Empty operations list
+        let ops: Vec<InstallOperation> = vec![];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Case 5: Operation with no extents
+        let ops = vec![mock_operation(vec![])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+    }
+
+    #[test]
+    fn test_overflow_protection() {
+        let cmd = test_cmd();
+
+        // Case 1: start_block + num_blocks would overflow u64
+        let ops = vec![mock_operation(vec![(u64::MAX - 5, 10)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+
+        // Case 2: Maximum valid extent
+        let ops = vec![mock_operation(vec![(0, u64::MAX)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+    }
+
+    // === CONCURRENT ACCESS TESTS (Version 2 specific) ===
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_concurrent_writes_to_disjoint_extents() {
+        const BLOCK_SIZE: usize = 4096;
+        const NUM_THREADS: usize = 8;
+        const BLOCKS_PER_THREAD: usize = 100;
+
+        // Create a mock partition file
+        let total_size = NUM_THREADS * BLOCKS_PER_THREAD * BLOCK_SIZE;
+        let mut data = vec![0u8; total_size];
+
+        // Create operations with disjoint extents
+        let operations: Vec<InstallOperation> = (0..NUM_THREADS)
+            .map(|i| {
+                let start_block = (i * BLOCKS_PER_THREAD) as u64;
+                mock_operation(vec![(start_block, BLOCKS_PER_THREAD as u64)])
+            })
+            .collect();
+
+        // Validate extents are non-overlapping
+        let cmd = test_cmd();
+        assert!(cmd.validate_non_overlapping_extents(&operations).is_ok());
+
+        // Simulate concurrent writes (like Version 2)
+        let write_count = Arc::new(AtomicUsize::new(0));
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(NUM_THREADS)
+            .build()
+            .unwrap();
+
+        // SAFETY: We're using the raw pointer pattern from your production code.
+        // The pointer is valid for the lifetime of this function, and validate_non_overlapping_extents
+        // ensures no two threads write to overlapping memory regions.
+        let base_ptr = data.as_mut_ptr() as usize; // Convert to usize (which is Send)
+
+        pool.scope(|scope| {
+            for (thread_id, op) in operations.iter().enumerate() {
+                let write_count = Arc::clone(&write_count);
+                let base_ptr = base_ptr; // Capture the usize
+                scope.spawn(move |_| {
+                    // Extract extent range (like extract_dst_extents_raw)
+                    let extent = &op.dst_extents[0];
+                    let start_block = extent.start_block.unwrap() as usize;
+                    let num_blocks = extent.num_blocks.unwrap() as usize;
+                    let start_byte = start_block * BLOCK_SIZE;
+                    let len_bytes = num_blocks * BLOCK_SIZE;
+
+                    // Create mutable slice (safe because extents don't overlap)
+                    // SAFETY: base_ptr is valid, and extent validation ensures no overlaps
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            (base_ptr as *mut u8).add(start_byte),
+                            len_bytes,
+                        )
+                    };
+
+                    // Write unique pattern
+                    slice.fill((thread_id + 1) as u8);
+                    write_count.fetch_add(1, Ordering::SeqCst);
+                });
+            }
+        });
+
+        // Verify all writes completed
+        assert_eq!(write_count.load(Ordering::SeqCst), NUM_THREADS);
+
+        // Verify each extent has correct pattern (no overwrites)
+        for (thread_id, op) in operations.iter().enumerate() {
+            let extent = &op.dst_extents[0];
+            let start_block = extent.start_block.unwrap() as usize;
+            let num_blocks = extent.num_blocks.unwrap() as usize;
+            let start_byte = start_block * BLOCK_SIZE;
+            let len_bytes = num_blocks * BLOCK_SIZE;
+
+            let expected_value = (thread_id + 1) as u8;
+            assert!(
+                data[start_byte..start_byte + len_bytes]
+                    .iter()
+                    .all(|&b| b == expected_value),
+                "Thread {} extent was corrupted",
+                thread_id
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "overlapping")]
+    fn test_concurrent_writes_detect_overlaps() {
+        const BLOCK_SIZE: usize = 4096;
+
+        let mut data = vec![0u8; 10 * BLOCK_SIZE];
+        let _base_ptr = data.as_mut_ptr(); // Prefix with _ to silence warning
+
+        // Create OVERLAPPING operations (intentionally invalid)
+        let operations = vec![
+            mock_operation(vec![(0, 10)]),
+            mock_operation(vec![(5, 10)]), // Overlaps!
+        ];
+
+        let cmd = test_cmd();
+
+        // This should panic/error before we even try concurrent writes
+        cmd.validate_non_overlapping_extents(&operations)
+            .expect("overlapping extents should be detected");
+    }
+
+    // === STRESS TEST ===
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_stress_many_small_extents() {
+        const NUM_OPERATIONS: usize = 1000;
+        const BLOCKS_PER_EXTENT: u64 = 10;
+
+        let cmd = test_cmd();
+
+        // Create many non-overlapping operations
+        let operations: Vec<InstallOperation> = (0..NUM_OPERATIONS)
+            .map(|i| {
+                let start = (i as u64) * BLOCKS_PER_EXTENT;
+                mock_operation(vec![(start, BLOCKS_PER_EXTENT)])
+            })
+            .collect();
+
+        assert!(cmd.validate_non_overlapping_extents(&operations).is_ok());
+
+        // Verify concurrent access would be safe
+        let total_blocks = NUM_OPERATIONS as u64 * BLOCKS_PER_EXTENT;
+        let total_bytes = total_blocks as usize * 4096;
+        let mut data = vec![0u8; total_bytes];
+
+        // SAFETY: Same pattern as production code - pointer is valid and extents don't overlap
+        let base_ptr = data.as_mut_ptr() as usize; // Convert to usize (which is Send)
+
+        let pool = ThreadPoolBuilder::new().build().unwrap();
+        pool.scope(|scope| {
+            for (idx, op) in operations.iter().enumerate() {
+                let base_ptr = base_ptr; // Capture the usize
+                scope.spawn(move |_| {
+                    let extent = &op.dst_extents[0];
+                    let start_byte = extent.start_block.unwrap() as usize * 4096;
+                    let len_bytes = extent.num_blocks.unwrap() as usize * 4096;
+
+                    // SAFETY: base_ptr is valid, extent validation ensures no overlaps
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            (base_ptr as *mut u8).add(start_byte),
+                            len_bytes,
+                        )
+                    };
+
+                    slice.fill((idx % 256) as u8);
+                });
+            }
+        });
+
+        // Verify no corruption
+        for (idx, op) in operations.iter().enumerate() {
+            let extent = &op.dst_extents[0];
+            let start_byte = extent.start_block.unwrap() as usize * 4096;
+            let len_bytes = extent.num_blocks.unwrap() as usize * 4096;
+            let expected = (idx % 256) as u8;
+
+            assert!(
+                data[start_byte..start_byte + len_bytes]
+                    .iter()
+                    .all(|&b| b == expected),
+                "Extent {} corrupted",
+                idx
+            );
+        }
+    }
+
+    // === PROPERTY-BASED TEST (using proptest if available) ===
+
+    #[cfg(feature = "proptest")]
+    use proptest::prelude::*;
+
+    #[cfg(feature = "proptest")]
+    proptest! {
+        #[test]
+        fn prop_non_overlapping_extents_are_valid(
+            extents in prop::collection::vec((0u64..1000, 1u64..100), 1..50)
+        ) {
+            let cmd = test_cmd();
+
+            // Sort and deduplicate to ensure non-overlapping
+            let mut sorted_extents = extents;
+            sorted_extents.sort_by_key(|(start, _)| *start);
+            sorted_extents.dedup();
+
+            // Create non-overlapping operations
+            let mut last_end = 0u64;
+            let operations: Vec<InstallOperation> = sorted_extents
+                .into_iter()
+                .filter_map(|(start, len)| {
+                    if start >= last_end {
+                        last_end = start + len;
+                        Some(mock_operation(vec![(start, len)]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !operations.is_empty() {
+                prop_assert!(cmd.validate_non_overlapping_extents(&operations).is_ok());
+            }
+        }
+
+        #[test]
+        fn prop_overlapping_extents_are_invalid(
+            base_start in 0u64..1000,
+            base_len in 10u64..100,
+            overlap_offset in 1u64..9,
+        ) {
+            let cmd = test_cmd();
+
+            // Create intentionally overlapping extents
+            let operations = vec![
+                mock_operation(vec![(base_start, base_len)]),
+                mock_operation(vec![(base_start + overlap_offset, base_len)]),
+            ];
+
+            prop_assert!(cmd.validate_non_overlapping_extents(&operations).is_err());
+        }
+    }
+    // Add these tests to your existing #[cfg(test)] mod tests block
+
+    #[test]
+    fn test_single_byte_extents() {
+        let cmd = test_cmd();
+
+        // Single-byte extents should work
+        let ops = vec![
+            mock_operation(vec![(0, 1)]),
+            mock_operation(vec![(1, 1)]),
+            mock_operation(vec![(2, 1)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Single-byte overlap
+        let ops = vec![
+            mock_operation(vec![(0, 2)]),
+            mock_operation(vec![(1, 1)]), // Overlaps at byte 1
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_large_extent_values() {
+        let cmd = test_cmd();
+
+        // Very large but valid extent
+        let ops = vec![
+            mock_operation(vec![(0, 1_000_000_000)]),
+            mock_operation(vec![(1_000_000_000, 1_000_000_000)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Large extent that would overflow when computing end
+        let ops = vec![mock_operation(vec![(u64::MAX / 2, u64::MAX / 2 + 2)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_interleaved_extents() {
+        let cmd = test_cmd();
+
+        // Multiple operations with interleaved non-overlapping extents
+        let ops = vec![
+            mock_operation(vec![(0, 5), (20, 5), (40, 5)]),
+            mock_operation(vec![(10, 5), (30, 5), (50, 5)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Interleaved with one overlap
+        let ops = vec![
+            mock_operation(vec![(0, 5), (20, 5), (40, 5)]),
+            mock_operation(vec![(10, 5), (30, 5), (42, 5)]), // Overlaps at 42
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_many_operations_single_extent_each() {
+        let cmd = test_cmd();
+
+        // 100 operations, each with a single non-overlapping extent
+        let ops: Vec<InstallOperation> = (0..100)
+            .map(|i| mock_operation(vec![(i * 10, 5)]))
+            .collect();
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Same but with one overlap in the middle
+        let mut ops: Vec<InstallOperation> = (0..100)
+            .map(|i| mock_operation(vec![(i * 10, 5)]))
+            .collect();
+        ops[50] = mock_operation(vec![(492, 10)]); // Overlaps with extent 49
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_gaps_between_extents() {
+        let cmd = test_cmd();
+
+        // Large gaps between extents (should be valid)
+        let ops = vec![
+            mock_operation(vec![(0, 1)]),
+            mock_operation(vec![(1000, 1)]),
+            mock_operation(vec![(1_000_000, 1)]),
+            mock_operation(vec![(1_000_000_000, 1)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+    }
+
+    #[test]
+    fn test_reverse_order_extents_in_single_operation() {
+        let cmd = test_cmd();
+
+        // Extents within a single operation in reverse order (should still validate correctly)
+        let ops = vec![mock_operation(vec![(40, 5), (20, 5), (0, 5)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Same but with overlap
+        let ops = vec![mock_operation(vec![(40, 10), (20, 25)])]; // 20..45 overlaps with 40..50
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_maximum_block_numbers() {
+        let cmd = test_cmd();
+
+        // Extent at maximum possible start position with small size
+        let ops = vec![mock_operation(vec![(u64::MAX - 100, 50)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Two extents near maximum
+        let ops = vec![
+            mock_operation(vec![(u64::MAX - 200, 50)]),
+            mock_operation(vec![(u64::MAX - 100, 50)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+    }
+
+    #[test]
+    fn test_many_zero_length_extents() {
+        let cmd = test_cmd();
+
+        // Multiple zero-length extents at the same position (should be valid)
+        let ops = vec![
+            mock_operation(vec![(0, 0)]),
+            mock_operation(vec![(0, 0)]),
+            mock_operation(vec![(0, 0)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Mix of zero-length and normal extents
+        let ops = vec![
+            mock_operation(vec![(0, 0), (10, 5), (20, 0)]),
+            mock_operation(vec![(0, 0), (15, 5), (25, 0)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+    }
+
+    #[test]
+    fn test_off_by_one_boundaries() {
+        let cmd = test_cmd();
+
+        // Extent ending exactly where next begins (adjacent, valid)
+        let ops = vec![
+            mock_operation(vec![(0, 10)]),
+            mock_operation(vec![(10, 10)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Off by one - starts one block before previous ends (overlap)
+        let ops = vec![mock_operation(vec![(0, 10)]), mock_operation(vec![(9, 10)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+
+        // Off by one - starts one block after previous ends (gap, valid)
+        let ops = vec![
+            mock_operation(vec![(0, 10)]),
+            mock_operation(vec![(11, 10)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+    }
+
+    // === CONCURRENT EDGE CASE TESTS ===
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_concurrent_single_byte_writes() {
+        const BLOCK_SIZE: usize = 4096;
+        const NUM_THREADS: usize = 16;
+
+        let total_size = NUM_THREADS * BLOCK_SIZE;
+        let mut data = vec![0u8; total_size];
+
+        // Each thread writes to a single block
+        let operations: Vec<InstallOperation> = (0..NUM_THREADS)
+            .map(|i| mock_operation(vec![(i as u64, 1)]))
+            .collect();
+
+        let cmd = test_cmd();
+        assert!(cmd.validate_non_overlapping_extents(&operations).is_ok());
+
+        let base_ptr = data.as_mut_ptr() as usize;
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(NUM_THREADS)
+            .build()
+            .unwrap();
+
+        pool.scope(|scope| {
+            for (thread_id, op) in operations.iter().enumerate() {
+                let base_ptr = base_ptr;
+                scope.spawn(move |_| {
+                    let extent = &op.dst_extents[0];
+                    let start_byte = extent.start_block.unwrap() as usize * BLOCK_SIZE;
+                    let len_bytes = extent.num_blocks.unwrap() as usize * BLOCK_SIZE;
+
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            (base_ptr as *mut u8).add(start_byte),
+                            len_bytes,
+                        )
+                    };
+
+                    slice.fill((thread_id + 1) as u8);
+                });
+            }
+        });
+
+        // Verify each block
+        for (thread_id, op) in operations.iter().enumerate() {
+            let extent = &op.dst_extents[0];
+            let start_byte = extent.start_block.unwrap() as usize * BLOCK_SIZE;
+            let len_bytes = extent.num_blocks.unwrap() as usize * BLOCK_SIZE;
+            let expected = (thread_id + 1) as u8;
+
+            assert!(
+                data[start_byte..start_byte + len_bytes]
+                    .iter()
+                    .all(|&b| b == expected),
+                "Thread {} block was corrupted",
+                thread_id
+            );
+        }
+    }
+
+    #[cfg_attr(miri, ignore)]
+    #[test]
+    fn test_concurrent_interleaved_writes() {
+        const BLOCK_SIZE: usize = 4096;
+
+        let total_size = 10 * BLOCK_SIZE;
+        let mut data = vec![0u8; total_size];
+
+        // Create interleaved pattern: thread 0 writes to blocks 0,2,4,6,8
+        // thread 1 writes to blocks 1,3,5,7,9
+        let operations: Vec<InstallOperation> = vec![
+            mock_operation(vec![(0, 1), (2, 1), (4, 1), (6, 1), (8, 1)]),
+            mock_operation(vec![(1, 1), (3, 1), (5, 1), (7, 1), (9, 1)]),
+        ];
+
+        let cmd = test_cmd();
+        assert!(cmd.validate_non_overlapping_extents(&operations).is_ok());
+
+        let base_ptr = data.as_mut_ptr() as usize;
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+
+        pool.scope(|scope| {
+            for (thread_id, op) in operations.iter().enumerate() {
+                let base_ptr = base_ptr;
+                scope.spawn(move |_| {
+                    for extent in &op.dst_extents {
+                        let start_byte = extent.start_block.unwrap() as usize * BLOCK_SIZE;
+                        let len_bytes = extent.num_blocks.unwrap() as usize * BLOCK_SIZE;
+
+                        let slice = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (base_ptr as *mut u8).add(start_byte),
+                                len_bytes,
+                            )
+                        };
+
+                        slice.fill((thread_id + 1) as u8);
+                    }
+                });
+            }
+        });
+
+        // Verify interleaved pattern
+        for block_idx in 0..10 {
+            let start = block_idx * BLOCK_SIZE;
+            let end = start + BLOCK_SIZE;
+            let expected = if block_idx % 2 == 0 { 1 } else { 2 };
+
+            assert!(
+                data[start..end].iter().all(|&b| b == expected),
+                "Block {} has wrong pattern",
+                block_idx
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_concurrent_with_gaps() {
+        const BLOCK_SIZE: usize = 4096;
+
+        // Create data with gaps (blocks 1, 3, 5 are never written to)
+        let total_size = 6 * BLOCK_SIZE;
+        let mut data = vec![0xFFu8; total_size]; // Fill with 0xFF to detect unwritten areas
+
+        let operations: Vec<InstallOperation> = vec![
+            mock_operation(vec![(0, 1)]),
+            mock_operation(vec![(2, 1)]),
+            mock_operation(vec![(4, 1)]),
+        ];
+
+        let cmd = test_cmd();
+        assert!(cmd.validate_non_overlapping_extents(&operations).is_ok());
+
+        let base_ptr = data.as_mut_ptr() as usize;
+        let pool = ThreadPoolBuilder::new().num_threads(3).build().unwrap();
+
+        pool.scope(|scope| {
+            for (thread_id, op) in operations.iter().enumerate() {
+                let base_ptr = base_ptr;
+                scope.spawn(move |_| {
+                    let extent = &op.dst_extents[0];
+                    let start_byte = extent.start_block.unwrap() as usize * BLOCK_SIZE;
+                    let len_bytes = extent.num_blocks.unwrap() as usize * BLOCK_SIZE;
+
+                    let slice = unsafe {
+                        std::slice::from_raw_parts_mut(
+                            (base_ptr as *mut u8).add(start_byte),
+                            len_bytes,
+                        )
+                    };
+
+                    slice.fill((thread_id + 1) as u8);
+                });
+            }
+        });
+
+        // Verify written blocks
+        assert!(data[0..BLOCK_SIZE].iter().all(|&b| b == 1));
+        assert!(data[2 * BLOCK_SIZE..3 * BLOCK_SIZE].iter().all(|&b| b == 2));
+        assert!(data[4 * BLOCK_SIZE..5 * BLOCK_SIZE].iter().all(|&b| b == 3));
+
+        // Verify gaps remain untouched (still 0xFF)
+        assert!(data[BLOCK_SIZE..2 * BLOCK_SIZE].iter().all(|&b| b == 0xFF));
+        assert!(
+            data[3 * BLOCK_SIZE..4 * BLOCK_SIZE]
+                .iter()
+                .all(|&b| b == 0xFF)
+        );
+        assert!(
+            data[5 * BLOCK_SIZE..6 * BLOCK_SIZE]
+                .iter()
+                .all(|&b| b == 0xFF)
+        );
+    }
+
+    #[test]
+    fn test_validation_with_duplicate_extents() {
+        let cmd = test_cmd();
+
+        // Exact duplicate extents in different operations (should fail)
+        let ops = vec![mock_operation(vec![(10, 5)]), mock_operation(vec![(10, 5)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+
+        // Duplicate extents in same operation (should also fail)
+        let ops = vec![mock_operation(vec![(10, 5), (10, 5)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_validation_performance_many_extents() {
+        let cmd = test_cmd();
+
+        // Test with 10,000 non-overlapping extents (validation should be fast)
+        let ops: Vec<InstallOperation> = (0..10000)
+            .map(|i| mock_operation(vec![(i * 10, 5)]))
+            .collect();
+
+        let start = std::time::Instant::now();
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+        let duration = start.elapsed();
+
+        // Validation should complete in reasonable time (< 100ms)
+        assert!(
+            duration.as_millis() < 100,
+            "Validation took too long: {:?}",
+            duration
+        );
+    }
+
+    #[test]
+    fn test_extent_at_zero_with_max_size() {
+        let cmd = test_cmd();
+
+        // Extent starting at 0 with maximum possible size
+        let ops = vec![mock_operation(vec![(0, u64::MAX)])];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Two extents where first is max size (should fail since second can't fit)
+        let ops = vec![
+            mock_operation(vec![(0, u64::MAX)]),
+            mock_operation(vec![(u64::MAX, 1)]), // This would overflow when computing end
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+    #[test]
+    fn test_real_world_partition_pattern() {
+        let cmd = test_cmd();
+
+        // Simulate realistic Android OTA pattern:
+        // - Boot partition: blocks 0-20000
+        // - System partition: blocks 20000-500000
+        // - Vendor partition: blocks 500000-600000
+        let ops = vec![
+            mock_operation(vec![(0, 20000)]),
+            mock_operation(vec![(20000, 480000)]),
+            mock_operation(vec![(500000, 100000)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Simulate corruption where system overlaps vendor by 1 block
+        let ops = vec![
+            mock_operation(vec![(0, 20000)]),
+            mock_operation(vec![(20000, 480001)]), // Overlaps!
+            mock_operation(vec![(500000, 100000)]),
+        ];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+
+    #[test]
+    fn test_sparse_fragmented_partition() {
+        let cmd = test_cmd();
+
+        // Simulate highly fragmented partition (common in incremental updates)
+        // Single operation with 50 small scattered extents
+        let extents: Vec<(u64, u64)> = (0..50)
+            .map(|i| (i * 1000, 10)) // 10 blocks every 1000 blocks
+            .collect();
+        let ops = vec![mock_operation(extents)];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_ok());
+
+        // Same but with two fragments overlapping
+        let mut extents: Vec<(u64, u64)> = (0..50).map(|i| (i * 1000, 10)).collect();
+        extents[25] = (24005, 10); // Overlaps with previous fragment
+        let ops = vec![mock_operation(extents)];
+        assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+}

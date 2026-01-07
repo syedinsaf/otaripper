@@ -43,6 +43,9 @@ xz2 = { version = "0.1.7", features = ["static"] }
 [build-dependencies]
 prost-build = "0.14.1"
 
+[features]
+proptest = []
+
 [profile.release]
 opt-level = 3
 lto = "fat"
