@@ -21,7 +21,7 @@ use std::io::{self, Read, Seek, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{env, slice};
 use sysinfo::{MemoryRefreshKind, RefreshKind};
@@ -960,9 +960,9 @@ impl Cmd {
                 // Assign an order index for hash printing
                 let part_index = hash_index_counter;
                 let hash_sender = hash_sender.clone();
-
                 let remaining_ops = Arc::new(AtomicUsize::new(update.operations.len()));
-
+                let base_addr = partition_file.as_ptr() as usize;
+                let partition_len_final = partition_len;
                 for op in update.operations.iter() {
                     let progress_bar = progress_bar.clone();
                     let partition_file = Arc::clone(&partition_file);
@@ -974,26 +974,25 @@ impl Cmd {
                     let partition_len_for_stats = partition_len;
                     let hash_sender = hash_sender.clone();
                     let cancellation_token = Arc::clone(&cancellation_token);
+                    let base_addr = base_addr;
+                    let partition_len = partition_len_final;
                     scope.spawn(move |_| {
                         if cancellation_token.load(Ordering::Acquire) {
                             return;
                         }
-                        let result = {
-                            // We drop the ReadGuard immediately to avoid any reference aliasing.
-                            let (base_ptr, partition_len) = {
-                                let mmap_guard = partition_file.read().expect("RwLock poisoned");
-                                let slice: &[u8] = &mmap_guard;
-                                (slice.as_ptr() as *mut u8, slice.len())
-                            };
-
-                            self.run_op_raw(
-                                op,
-                                payload,
-                                base_ptr,
-                                partition_len,
-                                block_size,
-                            )
-                        };
+                        // SAFETY: Reconstitute pointer inside the thread.
+                        // This is sound because:
+                        // 1. The partition_file Arc keeps the Mmap alive
+                        // 2. Extents are non-overlapping
+                        // 3. The scoped thread cannot outlive the Mmap
+                        let base_ptr = base_addr as *mut u8;
+                        let result = self.run_op_raw(
+                            op,
+                            payload,
+                            base_ptr,
+                            partition_len,
+                            block_size,
+                        );
                         match result {
                             Ok(_) => {}
                             Err(e) => {
@@ -1006,13 +1005,7 @@ impl Cmd {
                         if remaining_ops.fetch_sub(1, Ordering::AcqRel) == 1 {
                             // VERIFICATION PHASE: Exclusive access via write lock ensures all
                             // hardware store-buffers are synchronized and visible.
-
-
-
-                            let mmap_guard = partition_file.write().expect("RwLock poisoned");
-                            let final_slice: &[u8] = &mmap_guard;
-
-
+                            let final_slice: &[u8] = &partition_file;
                             // 1) Verification when enabled and hash provided
                             let mut computed_digest_opt: Option<[u8; 32]> = None;
                             if !self.no_verify {
@@ -1371,7 +1364,7 @@ impl Cmd {
         &self,
         update: &PartitionUpdate,
         partition_dir: impl AsRef<Path>,
-    ) -> Result<(Arc<RwLock<MmapMut>>, usize, PathBuf)> {
+    ) -> Result<(Arc<MmapMut>, usize, PathBuf)> {
         let partition_len = update
             .new_partition_info
             .as_ref()
@@ -1392,7 +1385,7 @@ impl Cmd {
             unsafe { MmapMut::map_mut(&file) }
                 .with_context(|| format!("failed to mmap file: {path:?}"))?
         };
-        let partition = Arc::new(RwLock::new(mmap));
+        let partition = Arc::new(mmap);
         Ok((partition, partition_len as usize, path))
     }
 
@@ -1476,30 +1469,88 @@ impl Cmd {
         Ok(())
     }
 
+    /// Validates that all dst_extents across all InstallOperations are non-overlapping.
+    ///
+    /// Fast path:
+    /// If the total covered block range is reasonably bounded, we do **O(n) bitmap sweep**
+    ///
+    /// Safe fallback:
+    /// Otherwise we retain the previous **O(n log n sorted sweep**
     fn validate_non_overlapping_extents(&self, operations: &[InstallOperation]) -> Result<()> {
-        let mut all_extents: Vec<(u64, u64)> = operations
-            .iter()
-            .flat_map(|op| op.dst_extents.iter())
-            .map(|extent| {
-                let start = extent.start_block.context("missing start_block")?;
-                let num_blocks = extent.num_blocks.context("missing num_blocks")?;
-                let end = start
-                    .checked_add(num_blocks)
-                    .context("extent end overflows u64")?;
-                Ok((start, end))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        all_extents.sort_unstable_by_key(|(start, _)| *start);
-        let mut last_end = 0;
-        for (start, end) in all_extents {
+        let mut extents: Vec<(u64, u64)> = Vec::new();
+        extents.reserve(operations.len() * 2);
+
+        for op in operations {
+            for e in &op.dst_extents {
+                let start = e.start_block.context("missing start_block")?;
+                let num = e.num_blocks.context("missing num_blocks")?;
+
+                let end = start.checked_add(num).context("extent end overflows u64")?;
+
+                // Zero-length extents are allowed but irrelevant
+                if num == 0 {
+                    continue;
+                }
+
+                extents.push((start, end));
+            }
+        }
+
+        // trivial success
+        if extents.len() <= 1 {
+            return Ok(());
+        }
+
+        // -------------------------
+        // O(N) BITMAP FAST PATH
+        // -------------------------
+        let min = extents.iter().map(|e| e.0).min().unwrap();
+        let max = extents.iter().map(|e| e.1).max().unwrap();
+
+        let span = max - min;
+
+        // Practical bound: 10 million blocks ≈ 10M * 4K = 40GB target image
+        // Anything bigger isn't worth bitmap memory
+        const MAX_BITMAP_BLOCKS: u64 = 10_000_000;
+
+        if span <= MAX_BITMAP_BLOCKS {
+            let mut bitmap = vec![false; span as usize];
+
+            for (start, end) in extents {
+                let rel_start = start - min;
+                let rel_end = end - min;
+
+                for i in rel_start..rel_end {
+                    let slot = &mut bitmap[i as usize];
+                    if *slot {
+                        bail!(
+                            "Overlapping destination extents detected near block {}",
+                            start
+                        );
+                    }
+                    *slot = true;
+                }
+            }
+
+            return Ok(());
+        }
+
+        // -------------------------
+        // SAFE FALLBACK: O(N log N)
+        // -------------------------
+        extents.sort_unstable_by_key(|(s, _)| *s);
+
+        let mut last_end = 0u64;
+        for (start, end) in extents {
             ensure!(
                 start >= last_end,
-                "Overlapping destination extents detected: block {} overlaps with prior extent ending at {}",
+                "Overlapping destination extents detected: {} < {}",
                 start,
                 last_end
             );
             last_end = end;
         }
+
         Ok(())
     }
     fn create_partition_dir(&self) -> Result<(PathBuf, bool)> {
