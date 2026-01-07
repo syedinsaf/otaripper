@@ -1,7 +1,10 @@
 // payload.rs
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail, Context};
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
+const MAX_METADATA_SIG_SIZE: u32 = 64 * 1024 * 1024; // 64 MiB
+const MAX_MANIFEST_SIZE: u64 = 256 * 1024 * 1024;    // 256 MiB
+const SUPPORTED_VERSION_MAX: u64 = 2;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -15,137 +18,94 @@ pub struct Payload<'a> {
 
 impl<'a> Payload<'a> {
     pub fn parse(bytes: &'a [u8]) -> Result<Self> {
-        // ---- Minimum header sanity ----
+        // ---- Basic Size Check ----
         if bytes.len() < 20 {
-            bail!(
-                "Payload too short to contain base header (need at least 20 bytes, got {})",
-                bytes.len()
-            );
+            bail!("This file is too small to be an Android update. Please check your download.");
         }
 
-        // ---- Magic ----
+        // ---- Magic & Vibe Checks ----
         let magic = &bytes[0..4];
-
         if magic != PAYLOAD_MAGIC {
-            let mut vibe = String::new();
-
-            // Windows PE / EXE
-            if magic.starts_with(b"MZ") {
-                vibe.push_str("💀 Bro… you just fed me a WINDOWS .EXE.\n");
-                vibe.push_str("What do you want me to extract? Task Manager??\n\n");
-            }
-            // ZIP
-            else if magic == b"PK\x03\x04" || magic == b"PK\x05\x06" || magic == b"PK\x07\x08" {
-                vibe.push_str("📦 This is a ZIP… which is GREAT…\n");
-                vibe.push_str("…except it does NOT contain a valid payload.bin 😭\n\n");
-            }
-            // Linux ELF binary
-            else if magic == b"\x7FELF" {
-                vibe.push_str("🐧 This is an ELF binary.\n");
-                vibe.push_str("You have given me Linux. I cannot extract Linux. I *am* Linux (spiritually).\n\n");
-            }
-            // JPEG
-            else if magic.starts_with(b"\xFF\xD8") {
-                vibe.push_str("🖼️ Not you trying to extract… a JPEG 💀\n\n");
-            }
-            // PNG
-            else if magic.starts_with(b"\x89PNG") {
-                vibe.push_str("🖌️ This is a PNG image.\n");
-                vibe.push_str("Pixels are not partitions my friend 😔\n\n");
-            }
+            let hint = match magic {
+                m if m.starts_with(b"MZ") => 
+                    "💀 Bro… you just fed me a WINDOWS .EXE.\nWhat do you want me to extract? Task Manager??\n\n",
+                b"PK\x03\x04" | b"PK\x05\x06" | b"PK\x07\x08" => 
+                    "📦 This is a ZIP archive… which is GREAT…\n…except it does NOT contain a valid payload.bin inside 😭\n\n",
+                b"\x7FELF" => 
+                    "🐧 This is a Linux system file.\nI only extract Android updates, and this isn't one of them.\n\n",
+                m if m.starts_with(b"\xFF\xD8") => 
+                    "🖼️ Not you trying to extract… a JPEG 💀\n\n",
+                m if m.starts_with(b"\x89PNG") => 
+                    "🖌️ This is a PNG image.\nPixels are not partitions my friend 😔\n\n",
+                _ => "❌ This file isn't a recognized Android update.\n\n"
+            };
 
             bail!(
-                "{}Expected OTA payload header: 'CrAU'\n\
-Found bytes: {:02X} {:02X} {:02X} {:02X}\n\n\
-👉 Valid inputs:\n  - payload.bin\n  - OTA update .zip (with payload.bin inside)\n\n\
-If unsure:\n  drag OTA.zip or payload.bin onto otaripper 😎",
-                vibe,
-                magic[0],
-                magic[1],
-                magic[2],
-                magic[3]
+                "{hint}\
+                👉 Valid inputs:\n  - A raw 'payload.bin' file\n  - A full OTA .zip (with payload.bin inside)\n\n\
+                💡 Tip: Just drag the correct file onto otaripper! 😎",
             );
         }
 
-        // ---- Version ----
+        // ---- Version & Size Parsing ----
         let file_format_version = u64::from_be_bytes(
-            bytes[4..12]
-                .try_into()
-                .map_err(|_| anyhow!("Failed to read file format version"))?,
+            bytes[4..12].try_into().map_err(|_| anyhow!("Internal Error: Could not read version"))?
         );
-
-        if file_format_version > 2 {
-            bail!(
-                "Unsupported payload version {} (only v1/v2 supported). Please update otaripper.",
-                file_format_version
-            );
+        
+        if file_format_version > SUPPORTED_VERSION_MAX {
+            bail!("This update uses a newer format than this version of otaripper supports. Please check for an app update!");
         }
 
-        // ---- Manifest Size ----
         let manifest_size = u64::from_be_bytes(
-            bytes[12..20]
-                .try_into()
-                .map_err(|_| anyhow!("Failed to read manifest size"))?,
+            bytes[12..20].try_into().map_err(|_| anyhow!("Internal Error: Could not read manifest size"))?
         );
-
-        // ---- v2 signature size handling ----
-        if file_format_version >= 2 && bytes.len() < 24 {
-            bail!("Version 2 payload requires at least 24-byte header");
+        
+        if manifest_size > MAX_MANIFEST_SIZE {
+            bail!("The update file metadata appears to be corrupted. Please try re-downloading.");
         }
 
-        let metadata_sig_size_u32 = if file_format_version >= 2 {
-            u32::from_be_bytes(
-                bytes[20..24]
-                    .try_into()
-                    .map_err(|_| anyhow!("Failed to read metadata signature size"))?,
-            )
+        // ---- v2 Handling ----
+        let (header_size, metadata_sig_size): (usize, usize) = if file_format_version >= 2 {
+            if bytes.len() < 24 { bail!("The file header is incomplete. This usually happens with a broken download."); }
+            let sig_size = u32::from_be_bytes(
+                bytes[20..24].try_into().map_err(|_| anyhow!("Internal Error: Could not read signature"))?
+            );
+            if sig_size > MAX_METADATA_SIG_SIZE { 
+                bail!("The file signature is invalid or corrupted."); 
+            }
+            (24, sig_size as usize)
         } else {
-            0
+            (20, 0)
         };
 
-        if metadata_sig_size_u32 > 64 * 1024 * 1024 {
-            bail!(
-                "Metadata signature size {} bytes is unreasonably large",
-                metadata_sig_size_u32
-            );
-        }
+        // ---- Combined Bounds Check with Overflow Protection ----
+        let manifest_len: usize = manifest_size
+            .try_into()
+            .context("This update is too large for your system memory to handle.")?;
 
-        let header_size: usize = if file_format_version >= 2 { 24 } else { 20 };
-
-        // ---- Manifest bounds ----
-        let manifest_start = header_size;
-        let manifest_end = manifest_start
-            .checked_add(manifest_size as usize)
-            .ok_or_else(|| anyhow!("Manifest size overflow"))?;
-
-        if manifest_end > bytes.len() {
-            bail!("Declared manifest size exceeds payload length");
-        }
-
-        // ---- Signature + Data bounds ----
-        let data_start = manifest_end
-            .checked_add(metadata_sig_size_u32 as usize)
-            .ok_or_else(|| anyhow!("Metadata signature size overflow"))?;
+        let data_start = header_size.checked_add(manifest_len)
+            .and_then(|sum| sum.checked_add(metadata_sig_size))
+            .ok_or_else(|| anyhow!("Memory overflow: This update file is abnormally large."))?;
 
         if data_start > bytes.len() {
-            bail!("Metadata signature extends beyond end of payload");
+            bail!(
+                "❌ Extraction Failed\n\n\
+                The file is missing a large chunk of data at the end. \n\
+                👉 Your download was likely interrupted. Please try downloading the file again!"
+            );
         }
 
         // ---- Final zero-copy slices ----
-        let manifest = &bytes[manifest_start..manifest_end];
-        let metadata_signature = if metadata_sig_size_u32 > 0 {
-            Some(&bytes[manifest_end..data_start])
-        } else {
-            None
-        };
-        let data = &bytes[data_start..];
-
         Ok(Self {
             file_format_version,
             manifest_size,
-            manifest,
-            metadata_signature,
-            data,
+            manifest: &bytes[header_size..header_size + manifest_len],
+            metadata_signature: if metadata_sig_size > 0 { 
+                Some(&bytes[header_size + manifest_len..data_start]) 
+            } else { 
+                None 
+            },
+            data: &bytes[data_start..],
         })
     }
 }
