@@ -81,6 +81,18 @@ otaripper ota.zip --partitions boot,init_boot
 otaripper -p path/to/ota.zip -o path/to/output_dir
 ```
 
+### Telemetry Output
+
+The `-l` flag provides a high-fidelity table output for pre-extraction analysis:
+
+```text
+Partition            Size             Type
+--------------------------------------------------
+boot                 64.00 MiB        Full (Verified)
+system_a             2.45 GiB         Full (Verified)
+vendor               512.12 MiB       Incremental (Patch)
+
+
 ### Common Workflows
 
 <details>
@@ -90,6 +102,7 @@ otaripper -p path/to/ota.zip -o path/to/output_dir
 # Extract boot partitions for recovery development
 ./otaripper ota.zip --partitions boot,recovery,vendor_boot --print-hash
 ```
+
 </details>
 
 <details>
