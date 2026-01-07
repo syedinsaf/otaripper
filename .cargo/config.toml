@@ -1,37 +1,44 @@
+# .cargo/config.toml
+# Global and per-target Rustflags for otaripper
+# Goal: Strong performance while staying broadly compatible
+
+# Baseline: x86-64-v2
+# This enables modern SSE4-era instructions (SSE3/SSSE3/SSE4.1/SSE4.2/POPCNT)
+# and runs safely on virtually all 64-bit CPUs from ~2009 onward.
+# AVX/AVX2 are NOT required (they are detected at runtime and used when available).
+# v2 is the safest modern baseline — good performance without breaking older CPUs.
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = [
-    "-C", "target-cpu=x86-64"
-    # Do NOT force +crt-static on glibc: dynamic linking avoids hard ISA requirements
-    #"-C", "target-feature=+crt-static"
-    # Build GNU/Linux target dynamically to avoid pulling in static glibc/liblzma objects
-    # that may require x86-64-v4 (AVX-512) on some toolchains/cdistros.
+  "-C",
+  "target-cpu=x86-64-v2", # Dynamic glibc build: safe for broad distros
+  # Explicitly avoid crt-static to prevent pulling glibc with x86-64-v4/v3 notes
 ]
 
 [target.x86_64-unknown-linux-musl]
 rustflags = [
-    "-C", "target-cpu=x86-64",
-    "-C", "target-feature=+crt-static"
+  "-C",
+  "target-cpu=x86-64-v2",
+  "-C",
+  "target-feature=+crt-static", # Safe to static-link on musl (no glibc ISA issues)
 ]
+
 [target.x86_64-pc-windows-msvc]
 rustflags = [
-    "-C", "target-cpu=x86-64",
-    "-C", "target-feature=+crt-static"
+  "-C",
+  "target-cpu=x86-64-v2",
+  "-C",
+  "target-feature=+crt-static", # Windows: static CRT is fine and reduces deps
 ]
 
 [target.x86_64-pc-windows-gnu]
-rustflags = [
-    "-C", "target-cpu=x86-64",
-    "-C", "target-feature=+crt-static"
-]
+rustflags = ["-C", "target-cpu=x86-64-v2", "-C", "target-feature=+crt-static"]
 
-# Android cross-compilation (You may have to this configure based on your system)
-
-[target.aarch64-linux-android]
-ar = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-linker = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-
-[env]
-CC_aarch64_linux_android = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-AR_aarch64_linux_android = "/opt/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-
+# Optional: Android cross-compilation setup (uncomment and adjust paths if needed)
+# [target.aarch64-linux-android]
+# ar = "/path/to/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+# linker = "/path/to/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+#
+# [env]
+# CC_aarch64_linux_android = "/path/to/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+# AR_aarch64_linux_android = "/path/to/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
