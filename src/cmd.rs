@@ -15,7 +15,6 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 use sha2::{Digest, Sha256};
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
-use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write, Seek};
@@ -642,6 +641,8 @@ impl Cmd {
 
         let mut manifest =
             DeltaArchiveManifest::decode(payload.manifest).context("unable to parse manifest")?;
+
+        // 1. Identify if the payload contains any incremental operations    
         let has_incremental_ops = manifest.partitions.iter().any(|p| {
             p.operations.iter().any(|op| {
                 matches!(
@@ -650,7 +651,57 @@ impl Cmd {
                 )
             })
         });
+        let block_size = manifest.block_size
+            .context("The update file is missing critical metadata (block_size). It is likely corrupted.")? as usize; 
+        ensure!(
+            (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size),
+            "The update file has an invalid internal structure (block size {} is unsupported). It may be corrupted.",
+            block_size,
+        );
 
+        // 2. LIST MODE: We allow this even for incremental files so the user can see the contents.
+        if self.list {
+            manifest
+                .partitions
+                .sort_unstable_by(|p1, p2| p1.partition_name.cmp(&p2.partition_name));
+            
+            println!("{:<20} {:<16} {:<10}", "Partition", "Size", "Type");
+            println!("{:-<46}", "");
+
+            for partition in &manifest.partitions {
+                let size = partition
+                    .new_partition_info
+                    .as_ref()
+                    .and_then(|info| info.size)
+                    .map(|size| indicatif::HumanBytes(size).to_string());
+                let size_str = size.as_deref().unwrap_or("???");
+
+                // Determine if this specific partition is a patch or a full image
+                let is_patch = partition.operations.iter().any(|op| {
+                    matches!(
+                        Type::try_from(op.r#type),
+                        Ok(Type::SourceCopy | Type::SourceBsdiff | Type::BrotliBsdiff | Type::Puffdiff | Type::Zucchini)
+                    )
+                });
+
+                let type_label = if is_patch {
+                    Style::new().bold().red().apply_to("Incremental")
+                } else {
+                    Style::new().bold().green().apply_to("Full")
+                };
+
+                let name_style = Style::new().bold().green();
+                println!(
+                    "{:<20} {:<16} {:<10}",
+                    name_style.apply_to(&partition.partition_name),
+                    size_str,
+                    type_label
+                );
+            }
+            return Ok(());
+        }
+
+        // 3. EXTRACTION GUARD: Now we block extraction if it's incremental.
         if has_incremental_ops {
             let bold_cyan = Style::new().bold().cyan();
             let bold_yellow = Style::new().bold().yellow();
@@ -672,36 +723,8 @@ impl Cmd {
                 sideload = bold_yellow.apply_to("\"Recovery Flashable\"")
             );
         }
-        let block_size = manifest.block_size.context("block_size not defined")? as usize;
-        ensure!(
-            block_size >= 512 && block_size <= 16 * 1024 * 1024,
-            "invalid block_size: {} (must be between {} and {})",
-            block_size,
-            MIN_BLOCK_SIZE,
-            MAX_BLOCK_SIZE
-        );
         
-        if self.list {
-            manifest
-                .partitions
-                .sort_unstable_by(|p1, p2| p1.partition_name.cmp(&p2.partition_name));
-            for partition in &manifest.partitions {
-                let size = partition
-                    .new_partition_info
-                    .as_ref()
-                    .and_then(|info| info.size)
-                    .map(|size| indicatif::HumanBytes(size).to_string());
-                let size = size.as_deref().unwrap_or("???");
-
-                let bold_green = Style::new().bold().green();
-                println!(
-                    "{} ({size})",
-                    bold_green.apply_to(&partition.partition_name)
-                );
-            }
-            return Ok(());
-        }
-
+        // 4. Continue with extraction setup...
         for partition in &self.partitions {
             if !manifest
                 .partitions
@@ -796,7 +819,6 @@ impl Cmd {
 
         // Create/ensure output directory and detect if it was newly created
         let (partition_dir, created_new_dir) = self.create_partition_dir()?;
-        let partition_dir = partition_dir.as_ref();
 
         let cleanup_state = Arc::new(Mutex::new((
             Vec::<PathBuf>::new(),
@@ -876,14 +898,15 @@ impl Cmd {
         }));
 
         // Inform the user about effective concurrency when -t/--threads is provided
-        if let Some(t) = self.threads {
-            if t > 0 {
+        if let Some(t) = self.threads 
+            && t > 0 
+            {
                 eprintln!(
                     "Using {} worker thread(s)",
                     threadpool.current_num_threads()
                 );
             }
-        }
+        
         let bold_bright_red = Style::new().bold().red();
         let bold_yellow = Style::new().bold().yellow();
         let bold_bright_green = Style::new().bold().green();
@@ -907,11 +930,14 @@ impl Cmd {
                 MultiProgress::with_draw_target(draw_target)
             };
             // Maintain the manifest/extraction order for neatly printing hashes later
-            let mut hash_index_counter: usize = 0;
-            // Process partitions in descending size order for better I/O locality and progress visibility
-            for update in manifest.partitions.iter().filter(|update| {
-                self.partitions.is_empty() || self.partitions.contains(&update.partition_name)
-            }) {
+            for (hash_index_counter, update) in manifest
+                .partitions
+                .iter()
+                .filter(|update| {
+                    self.partitions.is_empty() || self.partitions.contains(&update.partition_name)
+                })
+                .enumerate()
+            {
                 self.validate_non_overlapping_extents(&update.operations)
                     .with_context(|| format!("Invalid extents in partition '{}'", update.partition_name))?;
                 if cancellation_token.load(Ordering::Acquire) {
@@ -921,7 +947,7 @@ impl Cmd {
                 let progress_bar = self.create_progress_bar(update)?;
                 let progress_bar = multiprogress.add(progress_bar);
                 let (partition_file, partition_len, out_path) =
-                    self.open_partition_file(update, partition_dir)?;
+                    self.open_partition_file(update, &partition_dir)?;
                 // Track the file we just created for cleanup in case of errors
                 if let Ok(mut state) = cleanup_state.lock() {
                     state.0.push(out_path);
@@ -932,7 +958,6 @@ impl Cmd {
 
                 // Assign an order index for hash printing
                 let part_index = hash_index_counter;
-                hash_index_counter += 1;
                 let hash_sender = hash_sender.clone();
 
                 let remaining_ops = Arc::new(AtomicUsize::new(update.operations.len()));
@@ -944,10 +969,8 @@ impl Cmd {
 
 
                     let part_name = update.partition_name.clone();
-                    let part_start = part_start;
                     let stats_sender = stats_sender.clone();
                     let partition_len_for_stats = partition_len;
-                    let part_index = part_index;
                     let hash_sender = hash_sender.clone();
                     let cancellation_token = Arc::clone(&cancellation_token);
                     scope.spawn(move |_| {
@@ -958,7 +981,7 @@ impl Cmd {
                             // We drop the ReadGuard immediately to avoid any reference aliasing.
                             let (base_ptr, partition_len) = {
                                 let mmap_guard = partition_file.read().expect("RwLock poisoned");
-                                let slice: &[u8] = &*mmap_guard;
+                                let slice: &[u8] = &mmap_guard;
                                 (slice.as_ptr() as *mut u8, slice.len())
                             };
 
@@ -986,7 +1009,7 @@ impl Cmd {
 
 
                             let mmap_guard = partition_file.write().expect("RwLock poisoned");
-                            let final_slice: &[u8] = &*mmap_guard;
+                            let final_slice: &[u8] = &mmap_guard;
                             
 
                             // 1) Verification when enabled and hash provided
@@ -1028,14 +1051,13 @@ impl Cmd {
                             }
 
                             // 2) Sanity checks (e.g., detect all-zero images)
-                            if self.sanity {
-                                if is_all_zero(final_slice) {
+                            if self.sanity
+                                && is_all_zero(final_slice) {
                                     cancellation_token.store(true, Ordering::Release);
                                     eprintln!("\nCritical error: Sanity check failed for '{}': output image appears to be all zeros", part_name);
                                     eprintln!("Stopping extraction to prevent corrupted output...");
                                     return;
                                 }
-                            }
 
                             // Check cancellation before continuing
                             if cancellation_token.load(Ordering::Acquire) {
@@ -1149,11 +1171,11 @@ impl Cmd {
         }
 
         // Calculate and display extracted folder size
-        self.display_extracted_folder_size(partition_dir)?;
+        self.display_extracted_folder_size(&partition_dir)?;
 
         // Automatically open the extracted folder (unless disabled)
         if !self.no_open_folder {
-            self.open_extracted_folder(partition_dir)?;
+            self.open_extracted_folder(&partition_dir)?;
         }
 
         Ok(())
@@ -1176,12 +1198,12 @@ impl Cmd {
     /// # Safety
     /// This function is the core of otaripper's high-performance extraction.
     /// It is sound because:
-    /// 1. `base_ptr` is guaranteed to be valid for `partition_len` as long as the 
-    ///    `partition_file` Mmap is alive.
+    /// 1.`base_ptr` is guaranteed to be valid for `partition_len` as long as the 
+    ///   `partition_file` Mmap is alive.
     /// 2. Scoped threads (`rayon::scope`) ensure that worker threads cannot outlive 
-    ///     the `Mmap` lifetime.
+    ///   the `Mmap` lifetime.
     /// 3. `validate_non_overlapping_extents` proves that no two threads can receive 
-    ///    the same memory range, preventing data races and mutable aliasing UB.
+    ///   the same memory range, preventing data races and mutable aliasing UB.
     fn run_op_raw(
     &self,
     op: &InstallOperation,
@@ -1290,16 +1312,12 @@ impl Cmd {
         let mut archive = ZipArchive::new(&file)
             .context("File has ZIP magic but is not a valid ZIP archive")?;
             
-        match archive.by_name("payload.bin") {
-            Ok(mut zipfile) => {
-                let mut buffer = Vec::with_capacity(zipfile.size() as usize);
-                zipfile
-                    .read_to_end(&mut buffer)
-                    .context("Failed to read payload.bin from ZIP")?;
-                return Ok(PayloadSource::Owned(buffer));
-            }
-            Err(_) => {
-            }
+        if let Ok(mut zipfile) = archive.by_name("payload.bin") {
+            let mut buffer = Vec::with_capacity(zipfile.size() as usize);
+            zipfile
+                .read_to_end(&mut buffer)
+                .context("Failed to read payload.bin from ZIP")?;
+            return Ok(PayloadSource::Owned(buffer));
         }
     }
 
@@ -1359,12 +1377,11 @@ impl Cmd {
 
         let data = &payload.data[offset..end_offset];
 
-        if !self.no_verify {
-            if let Some(hash) = &op.data_sha256_hash {
+        if !self.no_verify
+            && let Some(hash) = &op.data_sha256_hash {
                 self.verify_sha256(data, hash)
                     .context("input verification failed")?;
             }
-        }
         Ok(data)
     }
 
@@ -1449,37 +1466,34 @@ impl Cmd {
         }
         Ok(())
     }
-    fn create_partition_dir(&self) -> Result<(Cow<'_, PathBuf>, bool)> {
-        let dir: Cow<'_, PathBuf> = match &self.output_dir {
+    fn create_partition_dir(&self) -> Result<(PathBuf, bool)> {
+        let dir = match &self.output_dir {
             Some(output_base) => {
-                // When -o is specified, create a timestamped folder within that directory
                 let now = Local::now();
                 let timestamp_folder = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
-                Cow::Owned(output_base.join(timestamp_folder))
+                output_base.join(timestamp_folder)
             }
             None => {
-                // When no -o is specified, create timestamped folder in current directory
                 let now = Local::now();
                 let current_dir = env::current_dir().with_context(|| {
                     "Failed to determine current directory. Please specify --output-dir explicitly."
                 })?;
                 let filename = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
-                Cow::Owned(current_dir.join(filename))
+                current_dir.join(filename)
             }
         };
-        let existed = dir.as_ref().exists();
-        fs::create_dir_all(dir.as_ref())
+        let existed = dir.exists();
+        fs::create_dir_all(&dir)
             .with_context(|| format!("could not create output directory: {dir:?}"))?;
         Ok((dir, !existed))
     }
 
     fn get_threadpool(&self) -> Result<ThreadPool> {
         let mut builder = ThreadPoolBuilder::new();
-        if let Some(t) = self.threads {
-            if t > 0 {
+        if let Some(t) = self.threads
+            && t > 0 {
                 builder = builder.num_threads(t);
             }
-        }
         builder.build().context("unable to start threadpool")
     }
 
