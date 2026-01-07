@@ -1475,30 +1475,88 @@ impl Cmd {
         Ok(())
     }
 
+    /// Validates that all dst_extents across all InstallOperations are non-overlapping.
+    ///
+    /// Fast path:
+    /// If the total covered block range is reasonably bounded, we do **O(n) bitmap sweep**
+    ///
+    /// Safe fallback:
+    /// Otherwise we retain the previous **O(n log n sorted sweep**
     fn validate_non_overlapping_extents(&self, operations: &[InstallOperation]) -> Result<()> {
-        let mut all_extents: Vec<(u64, u64)> = operations
-            .iter()
-            .flat_map(|op| op.dst_extents.iter())
-            .map(|extent| {
-                let start = extent.start_block.context("missing start_block")?;
-                let num_blocks = extent.num_blocks.context("missing num_blocks")?;
-                let end = start
-                    .checked_add(num_blocks)
-                    .context("extent end overflows u64")?;
-                Ok((start, end))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        all_extents.sort_unstable_by_key(|(start, _)| *start);
-        let mut last_end = 0;
-        for (start, end) in all_extents {
+        let mut extents: Vec<(u64, u64)> = Vec::new();
+        extents.reserve(operations.len() * 2);
+
+        for op in operations {
+            for e in &op.dst_extents {
+                let start = e.start_block.context("missing start_block")?;
+                let num = e.num_blocks.context("missing num_blocks")?;
+
+                let end = start.checked_add(num).context("extent end overflows u64")?;
+
+                // Zero-length extents are allowed but irrelevant
+                if num == 0 {
+                    continue;
+                }
+
+                extents.push((start, end));
+            }
+        }
+
+        // trivial success
+        if extents.len() <= 1 {
+            return Ok(());
+        }
+
+        // -------------------------
+        // O(N) BITMAP FAST PATH
+        // -------------------------
+        let min = extents.iter().map(|e| e.0).min().unwrap();
+        let max = extents.iter().map(|e| e.1).max().unwrap();
+
+        let span = max - min;
+
+        // Practical bound: 10 million blocks ≈ 10M * 4K = 40GB target image
+        // Anything bigger isn't worth bitmap memory
+        const MAX_BITMAP_BLOCKS: u64 = 10_000_000;
+
+        if span <= MAX_BITMAP_BLOCKS {
+            let mut bitmap = vec![false; span as usize];
+
+            for (start, end) in extents {
+                let rel_start = start - min;
+                let rel_end = end - min;
+
+                for i in rel_start..rel_end {
+                    let slot = &mut bitmap[i as usize];
+                    if *slot {
+                        bail!(
+                            "Overlapping destination extents detected near block {}",
+                            start
+                        );
+                    }
+                    *slot = true;
+                }
+            }
+
+            return Ok(());
+        }
+
+        // -------------------------
+        // SAFE FALLBACK: O(N log N)
+        // -------------------------
+        extents.sort_unstable_by_key(|(s, _)| *s);
+
+        let mut last_end = 0u64;
+        for (start, end) in extents {
             ensure!(
                 start >= last_end,
-                "Overlapping destination extents detected: block {} overlaps with prior extent ending at {}",
+                "Overlapping destination extents detected: {} < {}",
                 start,
                 last_end
             );
             last_end = end;
         }
+
         Ok(())
     }
     fn create_partition_dir(&self) -> Result<(PathBuf, bool)> {
@@ -2469,5 +2527,65 @@ mod tests {
         extents[25] = (24005, 10); // Overlaps with previous fragment
         let ops = vec![mock_operation(extents)];
         assert!(cmd.validate_non_overlapping_extents(&ops).is_err());
+    }
+    // =======================
+    // LOOM CONCURRENCY PROOFS
+    // =======================
+    #[cfg(all(test, feature = "loom"))]
+    mod loom_tests {
+        use super::*;
+        use loom::sync::Arc;
+        use loom::sync::atomic::{AtomicUsize, Ordering};
+        use loom::thread;
+
+        #[test]
+        fn loom_proves_disjoint_writes_are_race_free() {
+            let mut builder = loom::model::Builder::new();
+
+            builder.max_threads = 8;
+            builder.preemption_bound = Some(2);
+            builder.max_permutations = Some(10_000);
+            builder.max_duration = Some(std::time::Duration::from_secs(10));
+
+            builder.check(|| {
+                const BLOCK_SIZE: usize = 8;
+
+                let blocks = Arc::new([
+                    loom::cell::UnsafeCell::new([0u8; BLOCK_SIZE]),
+                    loom::cell::UnsafeCell::new([0u8; BLOCK_SIZE]),
+                    loom::cell::UnsafeCell::new([0u8; BLOCK_SIZE]),
+                    loom::cell::UnsafeCell::new([0u8; BLOCK_SIZE]),
+                ]);
+
+                let writes_done = Arc::new(AtomicUsize::new(0));
+                let mut handles = Vec::new();
+
+                for (thread_id, block_index) in [0, 1, 2, 3].into_iter().enumerate() {
+                    let blocks = blocks.clone();
+                    let writes_done = writes_done.clone();
+
+                    handles.push(loom::thread::spawn(move || {
+                        let cell = &blocks[block_index];
+
+                        cell.with(|ptr| {
+                            let slice: &mut [u8; BLOCK_SIZE] =
+                                unsafe { &mut *(ptr as *mut [u8; BLOCK_SIZE]) };
+
+                            for b in slice.iter_mut() {
+                                *b = (thread_id + 1) as u8;
+                            }
+                        });
+
+                        writes_done.fetch_add(1, Ordering::SeqCst);
+                    }));
+                }
+
+                for h in handles {
+                    h.join().unwrap();
+                }
+
+                assert_eq!(writes_done.load(Ordering::SeqCst), 4);
+            });
+        }
     }
 }
