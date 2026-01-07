@@ -24,6 +24,24 @@
 
 otaripper stands out with comprehensive safety features and performance optimizations that other tools lack. Unlike alternatives, it verifies both input files AND extracted outputs, preventing corrupted partitions that could brick your device.
 
+---
+
+## Technical Overview
+
+otaripper is a systems-level utility designed to saturate hardware throughput while maintaining absolute data integrity. Unlike standard extraction scripts, it leverages modern CPU instruction sets and rigorous memory-safety validation to ensure that extracted partitions are bit-perfect.
+
+## Core Pillars
+
+* **SIMD-Accelerated Core** Hand-tuned intrinsics for `AVX-512`, `AVX2`, and `SSE2` ensure data movement at the physical limits of the hardware.
+
+* **Cryptographic Rigor** Implementation of double-ended verification—validating both the source payload hashes and the final written output against manifest `SHA-256` signatures.
+
+* **Intelligent I/O Architecture** Utilizes Memory-Mapped I/O (`mmap`) and `MiMalloc` to eliminate unnecessary heap allocations and minimize kernel context switching.
+
+* **Forensic Inspection** A sophisticated telemetry mode identifies partition structures (`Full` vs. `Incremental`) to prevent the generation of invalid images from patch files.
+
+---
+
 ### Feature Comparison
 
 |                                    | [syedinsaf/otaripper]        | [ssut/payload-dumper-go]  | [vm03/payload_dumper] |
@@ -63,6 +81,18 @@ otaripper ota.zip --partitions boot,init_boot
 otaripper -p path/to/ota.zip -o path/to/output_dir
 ```
 
+### Telemetry Output
+
+The `-l` flag provides a high-fidelity table output for pre-extraction analysis:
+
+```text
+Partition            Size             Type
+--------------------------------------------------
+boot                 64.00 MiB        Full (Verified)
+system_a             2.45 GiB         Full (Verified)
+vendor               512.12 MiB       Incremental (Patch)
+```
+
 ### Common Workflows
 
 <details>
@@ -72,6 +102,7 @@ otaripper -p path/to/ota.zip -o path/to/output_dir
 # Extract boot partitions for recovery development
 ./otaripper ota.zip --partitions boot,recovery,vendor_boot --print-hash
 ```
+
 </details>
 
 <details>
