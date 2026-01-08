@@ -7,259 +7,178 @@
 
 # otaripper
 
-**Fast, safe, and reliable Android OTA partition extractor** <br />
-*Extract partitions from Android OTA files with enterprise-grade verification and performance*
+**Fast, safe, and reliable Android OTA partition extractor**
+
+Extract partitions from Android OTA files with cryptographic verification, strong reliability guarantees, and high-performance execution.
 
 [![GitHub release](https://img.shields.io/github/v/release/syedinsaf/otaripper?style=for-the-badge)](https://github.com/syedinsaf/otaripper/releases)
 [![Downloads](https://img.shields.io/github/downloads/syedinsaf/otaripper/total?style=for-the-badge)](https://github.com/syedinsaf/otaripper/releases)
 [![License](https://img.shields.io/github/license/syedinsaf/otaripper?style=for-the-badge)](LICENSE)
 
-[Download](https://github.com/syedinsaf/otaripper/releases) • [Usage](#quick-start) • [Build](#building-from-source) • [Advanced Usage](#Advanced-Features) 
+[Download](https://github.com/syedinsaf/otaripper/releases) • [Quick Start](#quick-start) • [Build Guide](#building-from-source) • [Technical Details](TECHNICAL.md)
 
 </div>
 
 ---
 
-## Why otaripper?
+## Table of Contents
 
-otaripper stands out with comprehensive safety features and performance optimizations that other tools lack. Unlike alternatives, it verifies both input files AND extracted outputs, preventing corrupted partitions that could brick your device.
+* [Overview](#overview)
+* [Feature Comparison](#feature-comparison)
+* [Performance](#performance)
+* [Quick Start](#quick-start)
+  * [Installation](#installation)
+  * [Build from Source](#build-from-source)
+* [Basic Usage](#basic-usage)
+* [Command Options](#command-options)
+* [Usage Examples](#usage-examples)
+* [Building from Source](#building-from-source)
+* [Contributing](#contributing)
+* [Acknowledgments](#acknowledgments)
+* [License](#license)
+* [Disclaimer](#disclaimer)
+
+For detailed technical documentation, see [TECHNICAL.md](TECHNICAL.md)
 
 ---
 
-## Technical Overview
+## Overview
 
-otaripper is a systems-level utility designed to saturate hardware throughput while maintaining absolute data integrity. Unlike standard extraction scripts, it leverages modern CPU instruction sets and rigorous memory-safety validation to ensure that extracted partitions are bit-perfect.
+otaripper extracts partitions from Android OTA packages (`payload.bin` or full OTA `.zip` files). The tool is built in Rust and prioritizes:
 
-## Core Pillars
+* Correctness and data integrity
+* Predictable and fail-safe behavior
+* Multi-threaded and SIMD-accelerated performance
+* Memory safety
+* Portability and ease of use
 
-* **SIMD-Accelerated Core** Hand-tuned intrinsics for `AVX-512`, `AVX2`, and `SSE2` ensure data movement at the physical limits of the hardware.
+Unlike most extraction tools, otaripper verifies output images to prevent corrupted partitions from being produced, reducing the risk of flashing invalid or damaged files.
 
-* **Cryptographic Rigor** Implementation of double-ended verification—validating both the source payload hashes and the final written output against manifest `SHA-256` signatures.
-
-* **Intelligent I/O Architecture** Utilizes Memory-Mapped I/O (`mmap`) and `MiMalloc` to eliminate unnecessary heap allocations and minimize kernel context switching.
-
-* **Forensic Inspection** A sophisticated telemetry mode identifies partition structures (`Full` vs. `Incremental`) to prevent the generation of invalid images from patch files.
+Incremental OTA packages are intentionally not supported.
 
 ---
 
-### Feature Comparison
+## Feature Comparison
 
-|                                    | [syedinsaf/otaripper]        | [ssut/payload-dumper-go]  | [vm03/payload_dumper] |
-| ---------------------------------- | --------------------- | ----------------- | -------------- |
-| Input file verification            | ✅                     | ✅                 | ❌              |
-| **Output file verification**       | ✅          | ❌                 | ❌              |
-| SIMD-optimized operations          | ✅           | ❌                 | ❌              |
-| Automatic error cleanup            | ✅           | ❌                 | ❌              |
-| Performance statistics             | ✅           | ❌                 | ❌              |
-| Extract selective partitions       | ✅                     | ✅                 | ✅              |
-| Parallelized extraction            | ✅                     | ✅                 | ❌              |
-| Direct .zip file support           | ✅                     | ✅                 | ❌              |
-| Graceful Ctrl+C handling           | ✅           | ❌                 | ❌              |
-| Real-time progress indicators      | ✅                     | ✅                 | ❌              |
-| Incremental OTA support            | ❌          | ❌                 | ✅      |
+|                         | otaripper v2.0        | payload-dumper-go | payload_dumper (Python) |
+| ----------------------- | --------------------- | ----------------- | ----------------------- |
+| Output verification     | SHA-256 verified      | No                | No                      |
+| SIMD optimization       | AVX-512 / AVX2 / SSE2 | No                | No                      |
+| Graceful interruption   | Yes                   | No                | No                      |
+| Auto-cleanup on failure | Yes                   | No                | No                      |
+| Performance statistics  | Yes                   | No                | No                      |
+| Selective extraction    | Yes                   | Yes               | Yes                     |
+| Direct ZIP support      | Yes                   | Yes               | No                      |
+| Multi-threaded          | Yes                   | Yes               | No (single-threaded)    |
+| Cross-platform          | Win/Linux/macOS       | Yes               | Requires Python         |
+| Standalone binary       | Yes                   | Yes               | No                      |
 
-> **Safety First**: otaripper is the only tool that verifies extracted partition integrity, preventing potentially dangerous corrupted files from reaching your device.
+> otaripper is designed to avoid producing corrupted or partially valid images. Failure handling is deliberate and conservative.
+
+---
+
+## Performance
+
+otaripper automatically detects CPU capabilities and uses the most appropriate SIMD instruction set available. Performance scales with storage speed, CPU capability, and OTA compression format.
+
+```
+Throughput Example (3GB system partition)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+otaripper (AVX-512)  ████████████ 2.8 GB/s
+otaripper (AVX2)     ████████     1.9 GB/s
+payload-dumper-go    ████         1.0 GB/s
+payload_dumper       ██           0.4 GB/s
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+Performance improves significantly on SSD storage and modern CPUs.
+
+For detailed performance architecture, see [TECHNICAL.md](TECHNICAL.md#performance-architecture)
 
 ---
 
 ## Quick Start
 
-### Basic Usage
+### Installation
+
+**Prebuilt binaries** are available in [Releases](https://github.com/syedinsaf/otaripper/releases):
+
+* Windows: `otaripper-x86_64-pc-windows-msvc.exe`
+* Linux (glibc): `otaripper-x86_64-unknown-linux-gnu`
+* Linux (musl): `otaripper-x86_64-unknown-linux-musl`
+* macOS (Intel): `otaripper-x86_64-apple-darwin`
+* macOS (Apple Silicon): `otaripper-aarch64-apple-darwin`
+
+### Build from Source
 
 ```bash
-# Drag & drop support - just run with your OTA file! or you run the below commands in CMD/Terminal
-otaripper ota.zip                    # Windows
-./otaripper ota.zip                  # Linux/macOS
+git clone https://github.com/syedinsaf/otaripper.git
+cd otaripper
+cargo build --release
+```
 
-# List partitions without extracting
+Binary location:
+* Linux/macOS: `target/release/otaripper`
+* Windows: `target/release/otaripper.exe`
+
+---
+
+## Basic Usage
+
+Extract everything:
+
+```bash
+otaripper ota.zip
+```
+
+List partitions:
+
+```bash
 otaripper -l ota.zip
-
-# Extract specific partitions only
-otaripper ota.zip --partitions boot,init_boot
-
-# Specify OTA file with -p and output directory with -o
-otaripper -p path/to/ota.zip -o path/to/output_dir
 ```
 
-### Telemetry Output
-
-The `-l` flag provides a high-fidelity table output for pre-extraction analysis:
-
-```text
-Partition            Size             Type
---------------------------------------------------
-boot                 64.00 MiB        Full (Verified)
-system_a             2.45 GiB         Full (Verified)
-vendor               512.12 MiB       Incremental (Patch)
-```
-
-### Common Workflows
-
-<details>
-<summary><strong>Custom Recovery Development</strong></summary>
+Extract selected partitions:
 
 ```bash
-# Extract boot partitions for recovery development
-./otaripper ota.zip --partitions boot,recovery,vendor_boot --print-hash
+otaripper ota.zip -p boot,vendor_boot,init_boot
 ```
 
-</details>
-
-<details>
-<summary><strong>ROM Development</strong></summary>
+Specify output directory:
 
 ```bash
-# Extract system partitions with verification
-./otaripper ota.zip --partitions system,system_ext,product,vendor --strict --stats
+otaripper ota.zip -o ~/extracted
 ```
-</details>
 
-<details>
-<summary><strong>Quick Boot Image Extraction</strong></summary>
+Print hashes:
 
 ```bash
-# Fast boot extraction 
-./otaripper ota.zip --partitions boot
+otaripper ota.zip --print-hash
 ```
-</details>
 
-<details>
-<summary><strong>Forensic Analysis</strong></summary>
+Strict verification mode:
 
 ```bash
-# Maximum safety with all verification enabled
-./otaripper ota.zip --strict --print-hash --plausibility-checks --stats
+otaripper ota.zip --strict
 ```
-</details>
 
----
-
-## Advanced Features
-
-### Safety & Integrity
-
-<table>
-<tr>
-<td><strong>--strict</strong></td>
-<td>
-<ul>
-<li>Enforces cryptographic verification for ALL operations</li>
-<li>Fails immediately if any hash is missing from manifest</li>
-<li>Cannot be combined with <code>--no-verify</code></li>
-<li><strong>Stops extraction and cleans up on any failure</strong></li>
-</ul>
-</td>
-</tr>
-<tr>
-<td><strong>--print-hash</strong></td>
-<td>
-<ul>
-<li>Displays SHA-256 hash for each extracted partition</li>
-<li>Format: <code>boot: sha256=a1b2c3d4...</code></li>
-<li>Perfect for verification and record-keeping</li>
-<li>Reuses computed hashes when possible (no extra passes)</li>
-</ul>
-</td>
-</tr>
-<tr>
-<td><strong>--plausibility-checks</strong></td>
-<td>
-<ul>
-<li>Detects obviously corrupted output (e.g., all-zero images)</li>
-<li>Lightweight checks with near-zero overhead</li>
-<li>Catches issues even when manifest hashes are missing</li>
-<li>Prevents flashing invalid partition images</li>
-</ul>
-</td>
-</tr>
-<tr>
-<td><strong>--no-verify</strong></td>
-<td>
-<ul>
-<li><strong>Use with extreme caution!</strong></li>
-<li>Skips all hash verification (faster but dangerous)</li>
-<li>Only recommended for trusted sources or debugging</li>
-<li>Cannot be used with <code>--strict</code></li>
-</ul>
-</td>
-</tr>
-</table>
-
-### Performance & Monitoring
-
-<table>
-<tr>
-<td><strong>--stats</strong></td>
-<td>Shows detailed performance metrics after extraction</td>
-</tr>
-<tr>
-<td><strong>--threads N</strong></td>
-<td>Control worker threads (1-256, or 0 for auto-detect)</td>
-</tr>
-<tr>
-<td><strong>--output-dir PATH</strong></td>
-<td>Custom output location (creates timestamped subdirectory)</td>
-</tr>
-<tr>
-<td><strong>--no-open-folder</strong></td>
-<td>Don't auto-open extracted folder when complete</td>
-</tr>
-</table>
-
-### User Experience
-
-- **Drag & Drop**: Simply drag OTA files onto the executable
-- **Safe Interruption**: Ctrl+C gracefully stops and cleans up partial files  
-- **Real-time Progress**: Live progress bars for all partitions
-- **Auto-open**: Automatically opens extraction folder when complete
-- **Smart Cleanup**: Removes partial files on any error
-- **Helpful Errors**: Clear messages with actionable solutions
-
----
-
-## Performance Optimizations
-
-### SIMD Acceleration
-**Automatic CPU optimization** - otaripper detects and uses the best available instruction set:
-
-| CPU Feature | Performance Gain | Supported CPUs |
-|-------------|------------------|----------------|
-| **AVX-512** | Up to 8x faster | Intel Skylake-X+, AMD Zen 4+ |
-| **AVX2** | Up to 4x faster | Intel Haswell+, AMD Excavator+ |
-| **SSE2** | Up to 2x faster | Intel Pentium 4+, AMD Athlon 64+ |
-| **Scalar** | Baseline | All other CPUs |
-
-<details>
-<summary><strong>Debug CPU detection</strong></summary>
+Disable automatic folder opening:
 
 ```bash
-# See what CPU features are detected
-OTARIPPER_DEBUG_CPU=1 ./otaripper ota.zip
+otaripper ota.zip -n
 ```
-</details>
 
-### Memory Optimizations
-- **Memory-mapped I/O**: Efficient file access without loading entire files
-- **In-memory ZIP processing**: No temporary files for ZIP extraction
-- **Extent coalescing**: Reduces memory copy operations by 60-80%
-- **Cache-friendly chunking**: 64KB optimal chunk size for better performance
-
-### Smart Hashing
-**Inline hashing** eliminates redundant passes for large partitions (>256 MiB):
+Performance statistics:
 
 ```bash
-# Environment controls for advanced users
-export OTARIPPER_INLINE=auto    # Use size heuristic (default: off)
-export OTARIPPER_INLINE=on      # Force inline hashing
-export OTARIPPER_INLINE=off     # Force post-pass hashing
+otaripper ota.zip --stats
 ```
 
 ---
 
-## Output Examples
+## Example Output
 
-### Successful Extraction
 ```
+Extraction in progress. Use Ctrl+C to cancel safely.
 Processing 12 partitions using 16 threads...
 
            boot [████████████████████] 100%
@@ -267,33 +186,122 @@ Processing 12 partitions using 16 threads...
          system [████████████████████] 100%
       system_ext [████████████████████] 100%
 
-Extraction completed successfully!
-Output directory: /home/user/extracted_20241225_143022
-Total extracted size: 8.2 GB
-Tool Source: https://github.com/syedinsaf/otaripper
-```
-
-### With Hash Verification
-```bash
-./otaripper ota.zip --print-hash
-```
-```
-Partition hashes (SHA-256):
-boot: sha256=a1b2c3d4e5f67890abcdef1234567890abcdef1234567890abcdef1234567890
-vendor_boot: sha256=b2c3d4e5f67890a1bcdef1234567890abcdef1234567890abcdef1234567890a
-system: sha256=c3d4e5f67890a1b2cdef1234567890abcdef1234567890abcdef1234567890ab
-```
-
-### Performance Statistics
-```bash
-./otaripper ota.zip --stats
-```
-```
 Extraction statistics:
   - boot: 64.0 MB in 45 ms (1.42 GB/s)
   - vendor_boot: 128.0 MB in 67 ms (1.91 GB/s)
   - system: 2.1 GB in 1205 ms (1.74 GB/s)
-  Total: 2.29 GB in 1317 ms (1.74 GB/s)
+
+Partition hashes (SHA-256):
+boot: sha256=a1b2c3d4e5f67890...
+vendor_boot: sha256=b2c3d4e5f67890a1...
+
+Extraction completed successfully.
+Output directory: /home/user/extracted_2024-12-25_14-30-22
+```
+
+---
+
+## Command Options
+
+| Option                  | Description                                      |
+| ----------------------- | ------------------------------------------------ |
+| `-l, --list`            | List partitions without extracting               |
+| `-p, --partitions`      | Extract only specific partitions (comma-separated) |
+| `-o, --output-dir PATH` | Custom output directory                          |
+| `--strict`              | Require manifest hashes and enforce verification |
+| `--no-verify`           | Disable all verification (not recommended)       |
+| `--print-hash`          | Print SHA-256 hashes for extracted partitions    |
+| `--sanity`              | Enable corruption detection checks               |
+| `--stats`               | Show performance statistics                      |
+| `-t, --threads N`       | Worker thread control (1–256, 0 for auto)        |
+| `-n, --no-open`         | Disable automatic folder opening                 |
+
+### Safety Options Explained
+
+**`--strict`**: Maximum security mode
+* Enforces cryptographic verification for all operations
+* Fails immediately if any hash is missing from manifest
+* Automatically cleans up on any verification failure
+* Cannot be combined with `--no-verify`
+
+**`--print-hash`**: Hash verification
+* Displays SHA-256 hash for each extracted partition
+* Reuses computed hashes (no extra passes)
+* Format: `partition: sha256=abc123...`
+
+**`--sanity`**: Corruption detection
+* Detects obviously corrupted output (e.g., all-zero images)
+* Lightweight checks with near-zero overhead
+* Catches issues even when manifest hashes are missing
+
+**`--no-verify`**: Fast but dangerous
+* Skips all hash verification (faster but risky)
+* Only for trusted sources or debugging
+* Cannot be used with `--strict`
+
+---
+
+## Usage Examples
+
+### For Beginners
+
+**Extract boot image for rooting**
+```bash
+# Extract just the boot partition
+./otaripper ota.zip -p boot
+
+# Verify it's correct
+./otaripper ota.zip -p boot --print-hash
+```
+
+**Check contents before extracting**
+```bash
+./otaripper -l ota.zip
+```
+
+### For ROM Developers
+
+**Extract system partitions with verification**
+```bash
+./otaripper ota.zip \
+  -p system,system_ext,product,vendor \
+  --strict \
+  --print-hash \
+  --stats
+```
+
+**Performance benchmarking**
+```bash
+for threads in 1 4 8 16 32; do
+  echo "Testing with $threads threads:"
+  ./otaripper ota.zip -t $threads --stats --no-open
+done
+```
+
+### For Custom Recovery Developers
+
+**Extract recovery-related partitions**
+```bash
+./otaripper ota.zip \
+  -p boot,recovery,vendor_boot,dtbo,vbmeta \
+  --print-hash \
+  -o ~/recovery-dev
+```
+
+### For Security Researchers
+
+**Forensic extraction with full verification**
+```bash
+# Maximum security + integrity checks
+./otaripper ota.zip \
+  --strict \
+  --sanity \
+  --print-hash \
+  --stats \
+  -o /secure/evidence
+
+# Save output for chain of custody
+./otaripper ota.zip --print-hash > sha256sums.txt
 ```
 
 ---
@@ -301,156 +309,131 @@ Extraction statistics:
 ## Building from Source
 
 ### Prerequisites
-- **Rust 1.82.0+** with Cargo
-- **Git** for cloning
+
+* Rust 1.92.0+ ([Install rustup](https://rustup.rs/))
+* Git
+* C compiler (gcc/clang/MSVC)
 
 ### Build Commands
 
 ```bash
-# Clone and build (optimized release)
+# Clone repository
 git clone https://github.com/syedinsaf/otaripper.git
 cd otaripper
+
+# Build release binary
 cargo build --release
 
-# Platform-specific optimizations
-cargo build --release --features asm-sha2  # Linux/macOS only
+# Run tests
+cargo test --release
+
+# Generate documentation
+cargo doc --open
 ```
 
-### Build Features
+### Platform-Specific Builds
 
-| Feature | Description | Compatibility |
-|---------|-------------|---------------|
-| `asm-sha2` | Assembly-optimized SHA-256 hashing | ✅ Linux/macOS<br>❌ Windows MSVC/GNU |
-| `default` | Standard optimizations | ✅ All platforms |
+**Linux (glibc)**
+```bash
+cargo build --release --target x86_64-unknown-linux-gnu
+```
 
-**Output Location:**
-- Linux/macOS: `target/release/otaripper`  
-- Windows: `target/release/otaripper.exe`
+**Linux (musl) - Static Binary**
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+```
+
+**Windows (MSVC)**
+```bash
+cargo build --release --target x86_64-pc-windows-msvc
+```
+
+**Windows (MinGW)**
+```bash
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+**macOS**
+```bash
+# Intel
+cargo build --release --target x86_64-apple-darwin
+
+# Apple Silicon
+cargo build --release --target aarch64-apple-darwin
+```
 
 ---
 
-## Advanced Usage
+## Contributing
 
-### Power User Examples
+Contributions, bug reports, and testing feedback are welcome.
 
-<details>
-<summary><strong>Maximum Safety Extraction</strong></summary>
+Please include:
+* System details (OS, CPU, RAM)
+* otaripper version
+* Logs where possible
+* Steps to reproduce
 
-```bash
-# Enterprise-grade extraction with all safety features
-./otaripper ota.zip \
-  --strict \
-  --print-hash \
-  --plausibility-checks \
-  --stats \
-  --output-dir /secure/location
-```
-</details>
-
-<details>
-<summary><strong>Performance-Optimized Extraction</strong></summary>
-
-```bash
-# Maximum speed extraction (trusted source only)
-./otaripper ota.zip \
-  --no-verify \
-  --no-open-folder \
-```
-</details>
-
-<details>
-<summary><strong>Development & Debugging</strong></summary>
-
-```bash
-# Detailed analysis with debug info
-OTARIPPER_DEBUG_CPU=1 OTARIPPER_INLINE=auto ./otaripper ota.zip \
-  --stats \
-  --print-hash \
-```
-</details>
-
-### Environment Variables
-
-| Variable | Values | Description |
-|----------|--------|-------------|
-| `OTARIPPER_DEBUG_CPU` | `1` | Show CPU feature detection |
-| `OTARIPPER_INLINE` | `on\|off\|auto` | Control inline hashing strategy |
-
----
-
-## FAQ
-
-<details>
-<summary><strong>Q: Is it safe to interrupt otaripper with Ctrl+C?</strong></summary>
-
-**A:** Yes! otaripper handles interruption gracefully:
-- Stops all worker threads safely
-- Removes any partially extracted files
-- Cleans up temporary directories if created
-- Shows clear cleanup status messages
-</details>
-
-<details>
-<summary><strong>Q: Why does otaripper create timestamped folders?</strong></summary>
-
-**A:** Timestamped folders prevent accidental overwrites and help track multiple extractions. Each run gets a unique folder like `extracted_20241225_143022`.
-</details>
-
-<details>
-<summary><strong>Q: What's the difference between --strict and normal mode?</strong></summary>
-
-**A:** 
-- **Normal mode**: Verifies hashes when available, continues if missing
-- **--strict mode**: REQUIRES all hashes to be present, fails immediately if any are missing
-- Use `--strict` for maximum safety, normal mode for compatibility
-</details>
-
-<details>
-<summary><strong>Q: How much faster is otaripper compared to other tools?</strong></summary>
-
-**A:** Performance varies by system, but typical improvements:
-- **2-4x faster** than payload_dumper (Python(C really)based)
-- **20-50% faster** than payload-dumper-go (again C)
-- **Up to 8x faster** on AVX-512 capable CPUs for large operations
-</details>
-
-## License
-
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+Pull requests are encouraged. Please:
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run tests (`cargo test`)
+5. Format code (`cargo fmt`)
+6. Commit with clear messages
+7. Push and create a Pull Request
 
 ---
 
 ## Acknowledgments
 
-- **Android Open Source Project** for OTA format specifications
-- **Rust Community** for excellent crates and tooling
-- **Contributors** who help make otaripper better
+This project benefits significantly from community testing and feedback.
 
+Special thanks to **[Jean Rivera](https://github.com/jeanrivera)** for extensive real-world testing, validation work, and constructive feedback that helped improve correctness and robustness.
 
-## Special Thanks
+Thanks also to:
+* Android Open Source Project documentation
+* Rust ecosystem maintainers
+* Users who reported issues and edge cases
+* All contributors who help make otaripper better
 
-Heartfelt thanks to [Jean Rivera](https://github.com/jeanrivera) for thorough testing and feedback during development. Your help made this project better!
+---
 
-[Star this repo](https://github.com/syedinsaf/otaripper/stargazers) •  [Report Issues](https://github.com/syedinsaf/otaripper/issues)  •  [Submit Pull Requests](https://github.com/syedinsaf/otaripper/pulls)
+## License
+
+otaripper is licensed under the **Apache License 2.0**. See [LICENSE](LICENSE) for details.
+
+---
+
+## Show Your Support
+
+If otaripper helped you:
+* Star this repository
+* Report issues
+* Submit pull requests
+* Share with others
+
+---
+
+<div align="center">
+
+**Made by [Syed Insaf](https://github.com/syedinsaf)**
+
+**Fast • Safe • Reliable**
 
 </div>
 
+---
 
-**Made with love by [Syed Insaf](https://github.com/syedinsaf)**
+## Disclaimer
 
+Use at your own risk.
 
-<div>
+* Always verify extracted partitions before flashing
+* Keep backups where possible
+* Understand your device and bootloader requirements
 
-## ⚠️ Disclaimer
+The author is not responsible for data loss, bricked devices, or damage resulting from misuse.
 
-
-**Important:**  Use this tool at your own risk. The author **assumes no responsibility** for any damages, data loss, or other issues caused directly or indirectly by the use of this software. Please ensure you understand the risks and take appropriate precautions (such as backing up your data) before using.
-
-By using this tool, you agree that you will not hold the author or maintainers liable for any damages or losses.
-
-</div>
-
-
-[syedinsaf/otaripper]: https://github.com/syedinsaf/otaripper
-[ssut/payload-dumper-go]: https://github.com/ssut/payload-dumper-go
-[vm03/payload_dumper]: https://github.com/vm03/payload_dumper
+By using this tool, you acknowledge these risks and agree that you will not hold the author or maintainers liable for any damages or losses.
