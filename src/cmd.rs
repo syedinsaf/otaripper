@@ -125,23 +125,6 @@ pub enum PayloadSource {
     Owned(Vec<u8>),
     Temp(Mmap, NamedTempFile),
 }
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct BuildInfo {
-    build_fingerprint: String,
-    build_id: String,
-    source_ota: String,
-    extracted_at: String,
-    chain: Vec<ChainLink>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct ChainLink {
-    build_fingerprint: String,
-    ota: String,
-    extracted_at: String,
-}
 
 impl Deref for PayloadSource {
     type Target = [u8];
@@ -1232,11 +1215,6 @@ impl Cmd {
         if let Ok(mut state) = cleanup_state.lock() {
             state.0.clear(); // Clear the file list so no cleanup happens
         }
-        self.save_build_info(
-            &partition_dir,
-            &manifest,
-            payload_path.file_name().unwrap().to_str().unwrap(),
-        )?;
 
         // Calculate and display extracted folder size
         self.display_extracted_folder_size(&partition_dir)?;
@@ -1289,7 +1267,14 @@ impl Cmd {
         // - These slices are NOT derived from a shared RwLock guard
         let mut dst_extents: Vec<&mut [u8]> = raw_extents
             .into_iter()
-            .map(|(ptr, len)| unsafe { slice::from_raw_parts_mut(ptr, len) })
+            .map(|(ptr, len)| {
+                // SAFETY:
+                // 1. `base_ptr` is valid for the lifetime of the partition Mmap.
+                // 2. `extract_dst_extents_raw` ensures the extent is within bounds.
+                // 3. `validate_non_overlapping_extents` ensures no two extents overlap,
+                //    guaranteeing these mutable slices do not alias.
+                unsafe { slice::from_raw_parts_mut(ptr, len) }
+            })
             .collect();
 
         // Now delegate to existing logic
@@ -1756,36 +1741,6 @@ impl Cmd {
         }
         Ok(0)
     }
-    fn save_build_info(
-        &self,
-        dir: &Path,
-        _manifest: &DeltaArchiveManifest,
-        ota_name: &str,
-    ) -> Result<()> {
-        let fingerprint = "unknown".to_string();
-
-        let chain = vec![ChainLink {
-            build_fingerprint: fingerprint.clone(),
-            ota: ota_name.to_string(),
-            extracted_at: Local::now().to_rfc3339(),
-        }];
-        let info = BuildInfo {
-            build_fingerprint: fingerprint.clone(),
-            build_id: "unknown".to_string(),
-            source_ota: ota_name.to_string(),
-            extracted_at: Local::now().to_rfc3339(),
-            chain,
-        };
-
-        fs::write(
-            dir.join(".build_info.json"),
-            serde_json::to_string_pretty(&info)?,
-        )?;
-
-        println!("✅ Build info saved");
-        println!("   Build: {}", fingerprint);
-        Ok(())
-    }
 
     fn validate_incremental_source(
         &self,
@@ -1831,7 +1786,7 @@ impl Cmd {
             // Compute actual hash
             let actual_hash = self.compute_sha256_of_mmap(&mmap);
 
-            // Compare
+            // Inside validate_incremental_source
             if actual_hash.as_slice() != expected_hash.as_slice() {
                 let msg = color_print::cformat!(
                     "<bold><red>Source hash mismatch</></bold>\n\
