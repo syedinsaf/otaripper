@@ -245,13 +245,13 @@ Output directory: /home/user/extracted_2024-12-25_14-30-22
 
 ### For Beginners
 
-**Extract boot image for rooting**
+**Extract init_boot image for rooting**
 ```bash
 # Extract just the boot partition
-./otaripper ota.zip -p boot
+./otaripper ota.zip -p init_boot
 
 # Verify it's correct
-./otaripper ota.zip -p boot --print-hash
+./otaripper ota.zip -p init_boot --print-hash
 ```
 
 **Check contents before extracting**
