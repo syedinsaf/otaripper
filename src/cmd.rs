@@ -2,9 +2,11 @@ use crate::chromeos_update_engine::install_operation::Type;
 use crate::chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUpdate};
 use crate::payload::Payload;
 use anyhow::{Context, Result, bail, ensure};
+use brotli::Decompressor;
 use bzip2::read::BzDecoder;
 use chrono::Local;
 use clap::{Parser, ValueHint};
+use color_print::cprintln;
 use console::Style;
 use crossbeam_channel::unbounded;
 use ctrlc;
@@ -108,6 +110,10 @@ pub struct Cmd {
     )]
     no_open: bool,
 
+    /// Source directory containing previous extraction (required for incremental OTA)
+    #[clap(long, value_hint = ValueHint::DirPath, value_name = "PATH")]
+    source_dir: Option<PathBuf>,
+
     /// Positional argument for the payload file
     #[clap(value_hint = ValueHint::FilePath)]
     #[clap(index = 1, value_name = "PATH")]
@@ -118,6 +124,23 @@ pub enum PayloadSource {
     Mapped(Mmap),
     Owned(Vec<u8>),
     Temp(Mmap, NamedTempFile),
+}
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Serialize, Deserialize)]
+struct BuildInfo {
+    build_fingerprint: String,
+    build_id: String,
+    source_ota: String,
+    extracted_at: String,
+    chain: Vec<ChainLink>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct ChainLink {
+    build_fingerprint: String,
+    ota: String,
+    extracted_at: String,
 }
 
 impl Deref for PayloadSource {
@@ -591,6 +614,40 @@ unsafe fn is_all_zero_sse2(data: &[u8]) -> bool {
 // Main extraction loop: process partitions in descending size order
 // for better progress bar visibility and cache behavior.
 impl Cmd {
+    fn open_source_partition(&self, source_dir: &Path, name: &str) -> Result<Mmap> {
+        let path = source_dir.join(format!("{}.img", name));
+        let file = File::open(&path)
+            .with_context(|| format!("missing source partition: {}", path.display()))?;
+        unsafe { Mmap::map(&file) }.context("failed to mmap source partition")
+    }
+    fn compute_sha256_of_mmap(&self, mmap: &Mmap) -> [u8; 32] {
+        let d = digest(&SHA256, mmap);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(d.as_ref());
+        out
+    }
+    fn read_source_extents(
+        &self,
+        op: &InstallOperation,
+        src: &Mmap,
+        block_size: usize,
+    ) -> Result<Vec<u8>> {
+        let mut out = Vec::new();
+
+        for extent in &op.src_extents {
+            let start_block = extent.start_block.context("missing src start_block")? as usize;
+            let num_blocks = extent.num_blocks.context("missing src num_blocks")? as usize;
+
+            let start = start_block * block_size;
+            let len = num_blocks * block_size;
+
+            ensure!(start + len <= src.len(), "source extent out of bounds");
+
+            out.extend_from_slice(&src[start..start + len]);
+        }
+
+        Ok(out)
+    }
     pub fn run(&self) -> Result<()> {
         // Initialize SIMD detection early - this ensures SIMD capabilities are
         // detected and available for all operations throughout the extraction
@@ -708,30 +765,13 @@ impl Cmd {
             return Ok(());
         }
 
-        // 3. EXTRACTION GUARD: Now we block extraction if it's incremental.
+        // 3. Extract Incremental OTAs
         if has_incremental_ops {
-            let bold_cyan = Style::new().bold().cyan();
-            let bold_yellow = Style::new().bold().yellow();
-
-            bail!(
-                "\n{header}\n\n\
-                This file is an {incremental} update (patch). It only contains the {changes} \
-                made between two versions, not the full system images.\n\n\
-                {stop} {tool_name} only supports {full_ota} images.\n\n\
-                {tip} Look for a larger zip (usually 2GB+) often labeled {factory} or {sideload} on OEM websites.\n",
-                header = Style::new()
-                    .bold()
-                    .red()
-                    .apply_to("❌ Extraction Not Possible"),
-                incremental = bold_cyan.apply_to("incremental"),
-                changes = bold_yellow.apply_to("binary changes"),
-                stop = Style::new().dim().apply_to("Note:"),
-                tool_name = env!("CARGO_PKG_NAME"),
-                full_ota = bold_cyan.apply_to("Full OTA"),
-                tip = Style::new().bold().green().apply_to("📌 Tip:"),
-                factory = bold_yellow.apply_to("\"Full OTA\""),
-                sideload = bold_yellow.apply_to("\"Recovery Flashable\"")
-            );
+            let src = self.source_dir.as_ref().context(
+                "Incremental OTA detected.\n\
+                 Please supply --source-dir with the previous extraction.",
+            )?;
+            self.validate_incremental_source(&manifest, src)?; // just validate, no return value needed
         }
 
         // 4. Continue with extraction setup...
@@ -822,6 +862,24 @@ impl Cmd {
                                 update.partition_name
                             );
                         }
+                    }
+                    // NEW: Require old_partition_info.hash for incremental partitions
+                    let is_incremental = update.operations.iter().any(|op| {
+                        matches!(
+                            Type::try_from(op.r#type),
+                            Ok(Type::SourceCopy | Type::SourceBsdiff | Type::BrotliBsdiff)
+                        )
+                    });
+                    if is_incremental {
+                        ensure!(
+                            update
+                                .old_partition_info
+                                .as_ref()
+                                .and_then(|i| i.hash.as_ref())
+                                .is_some(),
+                            "strict mode: missing old_partition_info.hash for incremental partition '{}'",
+                            update.partition_name
+                        );
                     }
                 }
             }
@@ -922,14 +980,8 @@ impl Cmd {
             );
         }
 
-        let bold_bright_red = Style::new().bold().red();
-        let bold_yellow = Style::new().bold().yellow();
-        let bold_bright_green = Style::new().bold().green();
-        eprintln!(
-            "\n{}: do {} close this window! Use {} to cancel safely.",
-            bold_yellow.apply_to("Extraction in progress"),
-            bold_bright_red.apply_to("NOT"),
-            bold_bright_green.apply_to("Ctrl+C")
+        cprintln!(
+            "<bold><yellow>Extraction in progress</>:</> do <bold><red>NOT</> close this window! Use <bold><green>Ctrl+C</> to cancel safely."
         );
         eprintln!(
             "Processing {} partitions using {} threads...",
@@ -1002,6 +1054,7 @@ impl Cmd {
                         let base_ptr = base_addr as *mut u8;
                         let result = self.run_op_raw(
                             op,
+                            &part_name,
                             payload,
                             base_ptr,
                             partition_len,
@@ -1179,6 +1232,11 @@ impl Cmd {
         if let Ok(mut state) = cleanup_state.lock() {
             state.0.clear(); // Clear the file list so no cleanup happens
         }
+        self.save_build_info(
+            &partition_dir,
+            &manifest,
+            payload_path.file_name().unwrap().to_str().unwrap(),
+        )?;
 
         // Calculate and display extracted folder size
         self.display_extracted_folder_size(&partition_dir)?;
@@ -1217,6 +1275,7 @@ impl Cmd {
     fn run_op_raw(
         &self,
         op: &InstallOperation,
+        partition_name: &str,
         payload: &Payload,
         base_ptr: *mut u8,
         partition_len: usize,
@@ -1248,6 +1307,53 @@ impl Cmd {
                 let data = self.extract_data(op, payload)?;
                 let mut decoder = xz2::read::XzDecoder::new(data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
+            }
+
+            // NEW: SOURCE_COPY
+            Type::SourceCopy => {
+                let source_dir = self
+                    .source_dir
+                    .as_ref()
+                    .context("SOURCE_COPY requires --source-dir")?;
+
+                let src_mmap = self.open_source_partition(source_dir, partition_name)?;
+
+                let src = self.read_source_extents(op, &src_mmap, block_size)?;
+                self.run_op_replace_slice(&src, &mut dst_extents, block_size)
+            }
+            Type::SourceBsdiff => {
+                let source_dir = self
+                    .source_dir
+                    .as_ref()
+                    .context("SOURCE_BSDIFF requires --source-dir")?;
+
+                let src_mmap = self.open_source_partition(source_dir, partition_name)?;
+                let src = self.read_source_extents(op, &src_mmap, block_size)?;
+
+                let patch = self.extract_data(op, payload)?;
+                let mut patch_reader = std::io::Cursor::new(patch);
+
+                let mut out = Vec::new();
+                bsdiff::patch(&src, &mut patch_reader, &mut out).context("bsdiff patch failed")?;
+
+                self.run_op_replace_slice(&out, &mut dst_extents, block_size)
+            }
+            Type::BrotliBsdiff => {
+                let source_dir = self
+                    .source_dir
+                    .as_ref()
+                    .context("BROTLI_BSDIFF requires --source-dir")?;
+
+                let src_mmap = self.open_source_partition(source_dir, partition_name)?;
+                let src = self.read_source_extents(op, &src_mmap, block_size)?;
+
+                let patch = self.extract_data(op, payload)?;
+                let mut brotli = Decompressor::new(std::io::Cursor::new(patch), 64 * 1024);
+
+                let mut out = Vec::new();
+                bsdiff::patch(&src, &mut brotli, &mut out).context("brotli bsdiff patch failed")?;
+
+                self.run_op_replace_slice(&out, &mut dst_extents, block_size)
             }
             Type::Zero | Type::Discard => Ok(()),
             _ => bail!("Unsupported operation type"),
@@ -1649,6 +1755,104 @@ impl Cmd {
             return Ok(total_size);
         }
         Ok(0)
+    }
+    fn save_build_info(
+        &self,
+        dir: &Path,
+        _manifest: &DeltaArchiveManifest,
+        ota_name: &str,
+    ) -> Result<()> {
+        let fingerprint = "unknown".to_string();
+
+        let chain = vec![ChainLink {
+            build_fingerprint: fingerprint.clone(),
+            ota: ota_name.to_string(),
+            extracted_at: Local::now().to_rfc3339(),
+        }];
+        let info = BuildInfo {
+            build_fingerprint: fingerprint.clone(),
+            build_id: "unknown".to_string(),
+            source_ota: ota_name.to_string(),
+            extracted_at: Local::now().to_rfc3339(),
+            chain,
+        };
+
+        fs::write(
+            dir.join(".build_info.json"),
+            serde_json::to_string_pretty(&info)?,
+        )?;
+
+        println!("✅ Build info saved");
+        println!("   Build: {}", fingerprint);
+        Ok(())
+    }
+
+    fn validate_incremental_source(
+        &self,
+        manifest: &DeltaArchiveManifest,
+        source_dir: &Path,
+    ) -> Result<()> {
+        for partition in &manifest.partitions {
+            // Skip partitions that don't use incremental operations
+            let uses_incremental = partition.operations.iter().any(|op| {
+                matches!(
+                    Type::try_from(op.r#type),
+                    Ok(Type::SourceCopy
+                        | Type::SourceBsdiff
+                        | Type::BrotliBsdiff
+                        | Type::Puffdiff
+                        | Type::Zucchini)
+                )
+            });
+            if !uses_incremental {
+                continue;
+            }
+
+            // Check if old_partition_info.hash is present
+            let expected_hash = partition
+                .old_partition_info
+                .as_ref()
+                .and_then(|info| info.hash.as_ref())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Incremental partition '{}' requires old_partition_info.hash, but it's missing in manifest",
+                        partition.partition_name
+                    )
+                })?;
+
+            // Open and mmap the source image
+            let src_path = source_dir.join(format!("{}.img", partition.partition_name));
+            let file = File::open(&src_path)
+                .with_context(|| format!("missing source partition: {}", src_path.display()))?;
+            let mmap = unsafe { Mmap::map(&file) }.with_context(|| {
+                format!("failed to mmap source partition: {}", src_path.display())
+            })?;
+
+            // Compute actual hash
+            let actual_hash = self.compute_sha256_of_mmap(&mmap);
+
+            // Compare
+            if actual_hash.as_slice() != expected_hash.as_slice() {
+                let msg = color_print::cformat!(
+                    "<bold><red>Source hash mismatch</></bold>\n\
+                     Partition:  <yellow>{}</>\n\
+                     Expected:   <green>{}</>\n\
+                     Got:        <red>{}</>\n\
+                     \n\
+                     This usually means the incremental OTA was not built from the provided source.\n\
+                     Check that:\n\
+                     • The source is the exact previous build\n\
+                     • Both OTAs are for the same device variant\n\
+                     • No intermediate updates are missing",
+                    partition.partition_name,
+                    hex::encode(expected_hash),
+                    hex::encode(actual_hash)
+                );
+                bail!("{}", msg);
+            }
+            println!("✅ Verified source partition: {}", partition.partition_name);
+        }
+        Ok(())
     }
 
     /// Automatically open the extracted folder in the default file manager
