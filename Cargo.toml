@@ -4,7 +4,7 @@ version = "2.0.0"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
-description = "Fast partition extractor for Android OTA zip and payload.bin files"
+description = "Ultra-fast partition extractor for Android OTA .zip and payload.bin files"
 repository = "https://github.com/syedinsaf/otaripper"
 license = "Apache-2.0"
 keywords = ["android", "ota", "cli", "payload", "extractor", "aosp"]
@@ -13,6 +13,8 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.100"
+bsdiff = "0.2.1"
+brotli = "3"
 bzip2 = "0.6.1"
 chrono = "0.4.42"
 clap = { version = "4.5.54", features = ["derive"] }
@@ -27,6 +29,8 @@ mimalloc = { version = "0.1.48", features = ["v3"] }
 prost = "0.14.1"
 rayon = "1.11.0"
 ring = "0.17.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 sysinfo = "0.37.2"
 tempfile = "3.24.0"
 xz2 = "0.1.7"
