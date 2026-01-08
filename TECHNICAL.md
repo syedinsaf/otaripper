@@ -523,6 +523,10 @@ cargo pgo build
    * Apply delta patches
    * Requires base image handling
 
+2. **Graphical User Interface (GUI)**
+   * Enhanced ease of use: Provides an intuitive visual layout that simplifies complex workflows for end-users.
+   * Reduced technical barrier: Enables non-technical users to manage updates and system settings without using command-line tools.
+   
 ### Performance Goals
 
 * **NVMe saturation**: 3+ GB/s on high-end drives
