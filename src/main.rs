@@ -10,9 +10,6 @@ use otaripper::cmd::Cmd;
 fn main() {
     if let Err(e) = Cmd::parse().run() {
         eprintln!("\nERROR: {:#}", e);
-        eprintln!(
-            "The program has been halted. Any partially extracted partition images have been removed."
-        );
         std::process::exit(1);
     }
 }
