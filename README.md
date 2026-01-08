@@ -418,7 +418,7 @@ If otaripper helped you:
 
 ---
 
-<div align="center">
+<div align="left">
 
 **Made by [Syed Insaf](https://github.com/syedinsaf)**
 
