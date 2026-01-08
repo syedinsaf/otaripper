@@ -409,10 +409,12 @@ otaripper is licensed under the **Apache License 2.0**. See [LICENSE](LICENSE) f
 ## Show Your Support
 
 If otaripper helped you:
-* Star this repository
-* Report issues
-* Submit pull requests
-* Share with others
+
+* **Star the repository** — https://github.com/syedinsaf/otaripper
+* **Report issues** — https://github.com/syedinsaf/otaripper/issues
+* **Submit pull requests** — https://github.com/syedinsaf/otaripper/pulls
+* **Share with others** — https://github.com/syedinsaf/otaripper
+
 
 ---
 
