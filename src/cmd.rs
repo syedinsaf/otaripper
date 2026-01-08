@@ -45,10 +45,6 @@ const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
     version = env!("CARGO_PKG_VERSION"),
 )]
 pub struct Cmd {
-    /// OTA file, either a .zip file or a payload.bin.
-    #[clap(short = 'p', long = "path", value_hint = ValueHint::FilePath, value_name = "PATH")]
-    payload: Option<PathBuf>,
-
     /// List partitions instead of extracting them
     #[clap(
         conflicts_with = "threads",
@@ -69,7 +65,7 @@ pub struct Cmd {
     output_dir: Option<PathBuf>,
 
     /// Dump only selected partitions (comma-separated)
-    #[clap(long, value_delimiter = ',', value_name = "PARTITIONS")]
+    #[clap(short = 'p', long, value_delimiter = ',', value_name = "PARTITIONS")]
     partitions: Vec<String>,
 
     /// Skip file verification (dangerous!)
@@ -107,9 +103,10 @@ pub struct Cmd {
     /// Don't automatically open the extracted folder after completion
     #[clap(
         long,
+        short = 'n',
         help = "Don't automatically open the extracted folder after completion."
     )]
-    no_open_folder: bool,
+    no_open: bool,
 
     /// Positional argument for the payload file
     #[clap(value_hint = ValueHint::FilePath)]
@@ -604,17 +601,34 @@ impl Cmd {
                 1..=256 => { /* Valid range */ }
                 _ => {
                     bail!(
-                        "Thread count must be between 1 and 256, got {}. \
-                        Use 0 or omit -t to use all available CPU cores (recommended).",
+                        "Thread count {} is out of range.\n\
+                         Valid range: 1–256\n\
+                         Hint: Use 0 or leave -t unset to auto-detect (recommended).",
                         t
                     );
                 }
             }
         }
 
-        let payload_path = self.payload.as_ref().or(self.positional_payload.as_ref())
+        let payload_path = self.positional_payload.as_ref()
             .ok_or_else(|| anyhow::anyhow!(
-                "No payload file specified. Please provide a payload file using -p/--path or as a positional argument.\n\nExamples:\n  otaripper payload.bin\n  otaripper -p ota.zip\n  otaripper --path update.zip"
+                "No payload file specified.\n\
+        \n\
+        Usage:\n\
+          otaripper <payload.zip | payload.bin>\n\
+        \n\
+        Examples:\n\
+          • Extract everything:\n\
+              otaripper update.zip\n\
+        \n\
+          • Extract only specific partitions:\n\
+              otaripper update.zip -p boot,init_boot,vendor_boot\n\
+        \n\
+        Tip:\n\
+          Use comma-separated partition names without .img extension. Names must match the OTA manifest.\n\
+        \n\
+        For more options and features, run:\n\
+          otaripper -h\n"
             ))?
             .clone();
 
@@ -1170,7 +1184,7 @@ impl Cmd {
         self.display_extracted_folder_size(&partition_dir)?;
 
         // Automatically open the extracted folder (unless disabled)
-        if !self.no_open_folder {
+        if !self.no_open {
             self.open_extracted_folder(&partition_dir)?;
         }
 
@@ -1694,19 +1708,24 @@ const FRIENDLY_HELP: &str = color_print::cstr!(
 {about}
 
 <bold>QUICK START</bold>
-  • Drag and drop an OTA .zip or payload.bin onto the executable.
+  • Drag & drop an OTA .zip or payload.bin onto the executable.
   • Or run via command line: <cyan>otaripper update.zip</cyan>
 
 <bold>COMMON TASKS</bold>
-  • <bold>List</bold> partitions:      otaripper -l update.zip
-  • <bold>Extract all</bold>:       otaripper update.zip
-  • <bold>Extract specific</bold>:  otaripper update.zip --partitions boot,init_boot
-  • <bold>Benchmarking</bold>:      otaripper update.zip --stats
+  • <bold>List</bold> partitions:                            otaripper -l update.zip
+  • <bold>Extract everything</bold>:                         otaripper update.zip
+  • <bold>Extract specific</bold>:                           otaripper update.zip -p boot,init_boot,vendor_boot
+  • <bold>Disable auto-open folder after extraction: </bold> otaripper update.zip -n
 
 <bold>SAFETY & INTEGRITY</bold>
-  • SHA-256 verification is <green>enabled by default</green> for all operations.
-  • Partial images are <red>automatically deleted</red> on error to prevent corruption.
-  • Use <yellow>--strict</yellow> to enforce manifest hash requirements.
+  • SHA-256 verification is <green>enabled by default</green>.
+  • Partial files are <red>automatically deleted</red> on failure.
+  • Use <yellow>--strict</yellow> to require manifest hashes and enforce verification.
+  • Skip verification (not recommended): <yellow>--no-verify</yellow>
+
+<bold>QUALITY OF LIFE</bold>
+  • Automatically opens extracted folder after success.
+  • Disable opening folder: <yellow>-n</yellow> or <yellow>--no-open</yellow>
 
 {usage-heading}
   {usage}
