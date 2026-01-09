@@ -1,0 +1,245 @@
+name: Manual Build (Artifacts Only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you running this build?"
+        required: false
+        default: "Manual build"
+
+env:
+  BIN_NAME: otaripper
+
+jobs:
+# =========================
+# Linux Builds
+# =========================
+  linux-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            outname: otaripper-linux-x86_64
+          - target: x86_64-unknown-linux-musl
+            outname: otaripper-linux-static-x86_64
+          - target: aarch64-unknown-linux-gnu
+            outname: otaripper-linux-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Protobuf Compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      - name: Install ARM64 cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Configure ARM64 toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+
+          [env]
+          CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
+          AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
+          EOF
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: |
+          if [ -f "target/${{ matrix.target }}/release/${BIN_NAME}" ]; then
+            strip target/${{ matrix.target }}/release/${BIN_NAME} || true
+          fi
+
+      - name: Package
+        run: |
+          mkdir pkg
+          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
+          cp README.md pkg/
+          cp LICENSE pkg/
+          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
+          sha256sum ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.outname }}
+          path: |
+            *.tar.gz
+            *.sha256
+
+# =========================
+# Windows Builds
+# =========================
+  windows-matrix:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            outname: otaripper-windows-msvc-x86_64
+          - target: x86_64-pc-windows-gnu
+            outname: otaripper-windows-gnu-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Protobuf Compiler
+        run: choco install protoc -y
+
+      - name: Install zip
+        run: choco install zip -y
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir pkg
+          cp target/${{ matrix.target }}/release/${BIN_NAME}.exe pkg/
+          cp README.md pkg/
+          cp LICENSE pkg/
+          zip -r ${{ matrix.outname }}.zip pkg
+          sha256sum ${{ matrix.outname }}.zip > ${{ matrix.outname }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.outname }}
+          path: |
+            *.zip
+            *.sha256
+
+# =========================
+# macOS Builds
+# =========================
+  macos-matrix:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            outname: otaripper-macos-x86_64
+          - target: aarch64-apple-darwin
+            outname: otaripper-macos-arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Protobuf Compiler
+        run: brew install protobuf
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary
+        run: |
+          if [ -f "target/${{ matrix.target }}/release/${BIN_NAME}" ]; then
+            strip target/${{ matrix.target }}/release/${BIN_NAME} || true
+          fi
+
+      - name: Package
+        run: |
+          mkdir pkg
+          cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
+          cp README.md pkg/
+          cp LICENSE pkg/
+          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
+          shasum -a 256 ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.outname }}
+          path: |
+            *.tar.gz
+            *.sha256
+
+# =========================
+# Android Build
+# =========================
+  android-arm64:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Protobuf Compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+        id: ndk
+
+      - name: Configure Android toolchain
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
+          [target.aarch64-linux-android]
+          linker = "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+
+          [env]
+          CC_aarch64_linux_android="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+          AR_aarch64_linux_android="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
+          EOF
+
+      - name: Build
+        run: cargo build --release --target aarch64-linux-android
+
+      - name: Strip Android binary
+        run: |
+          llvmstrip="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if [ -f "target/aarch64-linux-android/release/${BIN_NAME}" ]; then
+            "$llvmstrip" target/aarch64-linux-android/release/${BIN_NAME} || true
+          fi
+
+      - name: Package
+        run: |
+          mkdir pkg
+          cp target/aarch64-linux-android/release/${BIN_NAME} pkg/
+          cp README.md pkg/
+          cp LICENSE pkg/
+          zip -j otaripper-android-arm64.zip pkg/*
+          sha256sum otaripper-android-arm64.zip > otaripper-android-arm64.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otaripper-android-arm64
+          path: |
+            *.zip
+            *.sha256
