@@ -662,7 +662,7 @@ impl Cmd {
             block_size,
         );
 
-        // 2. LIST MODE: We allow this even for incremental files so the user can see the contents.
+        // 2. LIST MODE: Shows partition details and identifies Incremental vs Full updates.
         if self.list {
             manifest
                 .partitions
@@ -671,15 +671,21 @@ impl Cmd {
             println!("{:<20} {:<16} {:<10}", "Partition", "Size", "Type");
             println!("{:-<46}", "");
 
+            let partition_count = manifest.partitions.len();
+
             for partition in &manifest.partitions {
-                let size = partition
+                // Distinguish between explicit 0 size and missing metadata
+                let size_str = if let Some(size) = partition
                     .new_partition_info
                     .as_ref()
                     .and_then(|info| info.size)
-                    .map(|size| indicatif::HumanBytes(size).to_string());
-                let size_str = size.as_deref().unwrap_or("???");
+                {
+                    indicatif::HumanBytes(size).to_string()
+                } else {
+                    "???".to_string()
+                };
 
-                // Determine if this specific partition is a patch or a full image
+                // Check for operations that rely on source data (meaning it's a patch/delta)
                 let is_patch = partition.operations.iter().any(|op| {
                     matches!(
                         Type::try_from(op.r#type),
@@ -705,6 +711,14 @@ impl Cmd {
                     type_label
                 );
             }
+
+            // Simplified footer focusing only on the partition count
+            println!("{:-<46}", "");
+            println!(
+                "Total Partitions: {}",
+                Style::new().bold().cyan().apply_to(partition_count)
+            );
+
             return Ok(());
         }
 
