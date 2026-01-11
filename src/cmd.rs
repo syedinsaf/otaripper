@@ -141,20 +141,17 @@ pub struct ExtentsWriter<'a, 'b> {
     extents: &'a mut [&'b mut [u8]],
     idx: usize,
     off: usize,
+    simd: CpuSimd,
 }
 impl<'a, 'b> ExtentsWriter<'a, 'b> {
     /// Create a new ExtentsWriter for writing to the given extents.
-    pub fn new(extents: &'a mut [&'b mut [u8]]) -> Self {
+    pub(crate) fn new(extents: &'a mut [&'b mut [u8]], simd: CpuSimd) -> Self {
         Self {
             extents,
             idx: 0,
             off: 0,
+            simd,
         }
-    }
-
-    #[inline]
-    fn has_capacity(&self) -> bool {
-        self.idx < self.extents.len()
     }
 
     #[inline]
@@ -183,7 +180,7 @@ impl<'a, 'b> ExtentsWriter<'a, 'b> {
 
         // Hot path first: large copies (>= 1KB) use SIMD — this is the common case
         if to_copy >= SIMD_THRESHOLD {
-            simd_copy_large(src_slice, dest_slice);
+            simd_copy_large(self.simd, src_slice, dest_slice);
         } else {
             dest_slice.copy_from_slice(src_slice);
         }
@@ -199,18 +196,12 @@ impl<'a, 'b> ExtentsWriter<'a, 'b> {
 
 impl<'a, 'b> io::Write for ExtentsWriter<'a, 'b> {
     fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-
         let mut total_written = 0;
 
-        // Write to available extents
-        while !buf.is_empty() && self.has_capacity() {
+        while !buf.is_empty() {
             let written = self.write_to_current_extent(buf);
             if written == 0 {
-                // This shouldn't happen if has_capacity() is true, but let's be safe
-                break;
+                break; // no more capacity
             }
 
             total_written += written;
@@ -230,7 +221,7 @@ impl<'a, 'b> io::Write for ExtentsWriter<'a, 'b> {
 /// Debug output enabled via `OTARIPPER_DEBUG_CPU=1`.
 #[cfg(target_arch = "x86_64")]
 #[derive(Debug, Clone, Copy)]
-enum CpuSimd {
+pub(crate) enum CpuSimd {
     None,
     Sse2,
     Avx2,
@@ -245,36 +236,26 @@ impl CpuSimd {
         let avx2 = is_x86_feature_detected!("avx2");
         let sse2 = is_x86_feature_detected!("sse2");
 
-        // Only log when explicitly requested via environment variable
+        let selected = if avx512f && avx512bw {
+            CpuSimd::Avx512
+        } else if avx2 {
+            CpuSimd::Avx2
+        } else if sse2 {
+            CpuSimd::Sse2
+        } else {
+            CpuSimd::None
+        };
+
         if std::env::var("OTARIPPER_DEBUG_CPU").is_ok() {
             eprintln!("CPU Feature Detection:");
             eprintln!("  AVX512F: {}", avx512f);
             eprintln!("  AVX512BW: {}", avx512bw);
             eprintln!("  AVX2: {}", avx2);
             eprintln!("  SSE2: {}", sse2);
+            eprintln!("  Selected: {:?}", selected);
         }
 
-        if avx512f && avx512bw {
-            if std::env::var("OTARIPPER_DEBUG_CPU").is_ok() {
-                eprintln!("  Selected: AVX512");
-            }
-            CpuSimd::Avx512
-        } else if avx2 {
-            if std::env::var("OTARIPPER_DEBUG_CPU").is_ok() {
-                eprintln!("  Selected: AVX2");
-            }
-            CpuSimd::Avx2
-        } else if sse2 {
-            if std::env::var("OTARIPPER_DEBUG_CPU").is_ok() {
-                eprintln!("  Selected: SSE2");
-            }
-            CpuSimd::Sse2
-        } else {
-            if std::env::var("OTARIPPER_DEBUG_CPU").is_ok() {
-                eprintln!("  Selected: None (fallback to scalar)");
-            }
-            CpuSimd::None
-        }
+        selected
     }
 
     fn get() -> Self {
@@ -287,7 +268,7 @@ impl CpuSimd {
 // For non-x86_64 targets, we use a simple fallback enum
 #[cfg(not(target_arch = "x86_64"))]
 #[derive(Debug, Clone, Copy)]
-enum CpuSimd {
+pub(crate) enum CpuSimd {
     None,
 }
 
@@ -303,71 +284,65 @@ impl CpuSimd {
 
 /// SIMD-optimized large data copying
 #[inline]
-fn simd_copy_large(src: &[u8], dst: &mut [u8]) {
+fn simd_copy_large(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
 
-    // For very large transfers, process in cache-friendly chunks
     if src.len() > OPTIMAL_CHUNK_SIZE * 4 {
-        let mut src_offset = 0;
-        let mut dst_offset = 0;
+        let mut offset = 0;
 
-        while src_offset < src.len() {
-            let chunk_size = std::cmp::min(OPTIMAL_CHUNK_SIZE, src.len() - src_offset);
-            let src_chunk = &src[src_offset..src_offset + chunk_size];
-            let dst_chunk = &mut dst[dst_offset..dst_offset + chunk_size];
+        while offset < src.len() {
+            let chunk_size = std::cmp::min(OPTIMAL_CHUNK_SIZE, src.len() - offset);
 
-            simd_copy_chunk(src_chunk, dst_chunk);
+            let src_chunk = &src[offset..offset + chunk_size];
+            let dst_chunk = &mut dst[offset..offset + chunk_size];
 
-            src_offset += chunk_size;
-            dst_offset += chunk_size;
+            simd_copy_chunk(simd, src_chunk, dst_chunk);
+
+            offset += chunk_size;
         }
     } else {
-        simd_copy_chunk(src, dst);
+        simd_copy_chunk(simd, src, dst);
     }
 }
 
 #[inline(always)]
-fn simd_copy_chunk(src: &[u8], dst: &mut [u8]) {
-    #[cfg(target_arch = "x86_64")]
-    {
-        match CpuSimd::get() {
-            CpuSimd::Avx512 => unsafe {
-                if src.len() >= 1_048_576 {
-                    simd_copy_avx512_stream(src, dst);
-                } else {
-                    simd_copy_avx512(src, dst);
-                }
-            },
-            CpuSimd::Avx2 => unsafe {
-                if src.len() >= 1_048_576 {
-                    simd_copy_avx2_stream(src, dst);
-                } else {
-                    simd_copy_avx2(src, dst);
-                }
-            },
-            CpuSimd::Sse2 => unsafe { simd_copy_sse2(src, dst) },
-            CpuSimd::None => dst.copy_from_slice(src),
-        }
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        dst.copy_from_slice(src);
+fn simd_copy_chunk(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
+    match simd {
+        CpuSimd::Avx512 => unsafe {
+            if src.len() >= 1_048_576 {
+                simd_copy_avx512_stream(src, dst);
+            } else {
+                simd_copy_avx512(src, dst);
+            }
+        },
+        CpuSimd::Avx2 => unsafe {
+            if src.len() >= 1_048_576 {
+                simd_copy_avx2_stream(src, dst);
+            } else {
+                simd_copy_avx2(src, dst);
+            }
+        },
+        CpuSimd::Sse2 => unsafe { simd_copy_sse2(src, dst) },
+        CpuSimd::None => dst.copy_from_slice(src),
     }
 }
-/// Public function: zero-check with SIMD auto-dispatch
+
+/// Zero-check with SIMD already selected (hot path)
 #[inline(always)]
-fn is_all_zero(data: &[u8]) -> bool {
+fn is_all_zero_with_simd(simd: CpuSimd, data: &[u8]) -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        match CpuSimd::get() {
+        match simd {
             CpuSimd::Avx512 => unsafe { is_all_zero_avx512(data) },
             CpuSimd::Avx2 => unsafe { is_all_zero_avx2(data) },
             CpuSimd::Sse2 => unsafe { is_all_zero_sse2(data) },
             CpuSimd::None => data.iter().all(|&b| b == 0),
         }
     }
+
     #[cfg(not(target_arch = "x86_64"))]
     {
+        // Non-x86 always scalar (auto-vectorized by LLVM)
         data.iter().all(|&b| b == 0)
     }
 }
@@ -401,9 +376,7 @@ unsafe fn simd_copy_avx512(src: &[u8], dst: &mut [u8]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
-    let len = src.len();
-
-    if len < 1_048_576 {
+    if src.len() < 1_048_576 {
         unsafe {
             return simd_copy_avx512(src, dst);
         }
@@ -414,7 +387,7 @@ unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
     let mut i = 0;
 
     // Work in 64-byte blocks
-    let simd_end = len & !63;
+    let simd_end = src.len() & !63;
     while i < simd_end {
         unsafe {
             let data = _mm512_loadu_si512(src_ptr.add(i) as *const __m512i);
@@ -428,7 +401,7 @@ unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
         // that this operation is complete.
     }
     // Tail
-    if i < len {
+    if i < src.len() {
         dst[i..].copy_from_slice(&src[i..]);
     }
 }
@@ -437,11 +410,10 @@ unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn simd_copy_avx2(src: &[u8], dst: &mut [u8]) {
-    let len = src.len();
     let src_ptr = src.as_ptr();
     let dst_ptr = dst.as_mut_ptr();
     let mut i = 0;
-    let simd_end = len.saturating_sub(31);
+    let simd_end = src.len().saturating_sub(31);
 
     while i < simd_end {
         unsafe {
@@ -451,19 +423,18 @@ unsafe fn simd_copy_avx2(src: &[u8], dst: &mut [u8]) {
         i += 32;
     }
 
-    if i < len {
+    if i < src.len() {
         let remaining_src = &src[i..];
         let remaining_dst = &mut dst[i..];
         remaining_dst.copy_from_slice(remaining_src);
     }
 }
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
-    let len = src.len();
-
-    if len < 1_048_576 {
+    if src.len() < 1_048_576 {
         unsafe {
             return simd_copy_avx2(src, dst);
         }
@@ -474,7 +445,7 @@ unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
     let mut i = 0;
 
     // Work in 32-byte blocks
-    let simd_end = len & !31;
+    let simd_end = src.len() & !31;
     while i < simd_end {
         unsafe {
             let data = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
@@ -489,7 +460,7 @@ unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
         // that this operation is complete.
     }
     // Tail
-    if i < len {
+    if i < src.len() {
         dst[i..].copy_from_slice(&src[i..]);
     }
 }
@@ -498,11 +469,10 @@ unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
 #[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn simd_copy_sse2(src: &[u8], dst: &mut [u8]) {
-    let len = src.len();
     let src_ptr = src.as_ptr();
     let dst_ptr = dst.as_mut_ptr();
     let mut i = 0;
-    let simd_end = len.saturating_sub(15);
+    let simd_end = src.len().saturating_sub(15);
 
     while i < simd_end {
         unsafe {
@@ -512,35 +482,31 @@ unsafe fn simd_copy_sse2(src: &[u8], dst: &mut [u8]) {
         i += 16;
     }
 
-    if i < len {
+    if i < src.len() {
         let remaining_src = &src[i..];
         let remaining_dst = &mut dst[i..];
         remaining_dst.copy_from_slice(remaining_src);
     }
 }
-
-// === SIMD Zero-Check Implementations ===
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f", enable = "avx512bw")]
 #[inline]
 unsafe fn is_all_zero_avx512(data: &[u8]) -> bool {
-    let len = data.len();
     let ptr = data.as_ptr();
     let mut i = 0;
-    let simd_end = len.saturating_sub(63);
+    let simd_end = data.len().saturating_sub(63);
 
     while i < simd_end {
         unsafe {
             let chunk = _mm512_loadu_si512(ptr.add(i) as *const __m512i);
-            let zero = _mm512_setzero_si512();
-            let cmp = _mm512_cmpeq_epi8_mask(chunk, zero);
-            if cmp != u64::MAX {
+
+            if _mm512_test_epi8_mask(chunk, chunk) != 0 {
+                // ← Correct
                 return false;
             }
         }
         i += 64;
     }
-
     data[i..].iter().all(|&b| b == 0)
 }
 
@@ -548,35 +514,30 @@ unsafe fn is_all_zero_avx512(data: &[u8]) -> bool {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn is_all_zero_avx2(data: &[u8]) -> bool {
-    let len: usize = data.len();
     let ptr = data.as_ptr();
     let mut i = 0;
-    let simd_end = len.saturating_sub(31);
+    let simd_end = data.len().saturating_sub(31);
 
     while i < simd_end {
         unsafe {
             let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-            let zero = _mm256_setzero_si256();
-            let cmp = _mm256_cmpeq_epi8(chunk, zero);
-            let mask = _mm256_movemask_epi8(cmp);
-            if mask != -1 {
+
+            if _mm256_testz_si256(chunk, chunk) == 0 {
+                // ← Correct
                 return false;
             }
         }
         i += 32;
     }
-
     data[i..].iter().all(|&b| b == 0)
 }
-
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2")]
 #[inline]
 unsafe fn is_all_zero_sse2(data: &[u8]) -> bool {
-    let len = data.len();
     let ptr = data.as_ptr();
     let mut i = 0;
-    let simd_end = len.saturating_sub(15);
+    let simd_end = data.len().saturating_sub(15);
 
     while i < simd_end {
         unsafe {
@@ -599,7 +560,7 @@ impl Cmd {
     pub fn run(&self) -> Result<()> {
         // Initialize SIMD detection early - this ensures SIMD capabilities are
         // detected and available for all operations throughout the extraction
-        let _simd_level = CpuSimd::get();
+        let simd = CpuSimd::get();
         if let Some(t) = self.threads {
             match t {
                 0 => { /* Use default - valid */ }
@@ -665,6 +626,11 @@ impl Cmd {
         ensure!(
             (MIN_BLOCK_SIZE..=MAX_BLOCK_SIZE).contains(&block_size),
             "The update file has an invalid internal structure (block size {} is unsupported). It may be corrupted.",
+            block_size,
+        );
+        ensure!(
+            block_size.is_power_of_two(),
+            "The update file is malformed: block size {} is not a power of two.",
             block_size,
         );
 
@@ -1036,6 +1002,7 @@ impl Cmd {
                     let error_message = Arc::clone(&error_message);
                     let partition_len = partition_len_final;
                     let source_dir_arc = Arc::clone(&source_dir_arc);
+                    let simd = simd;
                     scope.spawn(move |_| {
                         let source_dir = source_dir_arc.as_deref();
                         if cancellation_token.load(Ordering::Acquire) {
@@ -1055,6 +1022,7 @@ impl Cmd {
                             block_size,
                             &part_name,
                             source_dir,
+                            simd,
                         );
                         match result {
                             Ok(_) => {}
@@ -1116,7 +1084,7 @@ impl Cmd {
 
                             // 2) Sanity checks (e.g., detect all-zero images)
                             if self.sanity
-                                && is_all_zero(final_slice) {
+                                && is_all_zero_with_simd(simd, final_slice) {
                                     cancellation_token.store(true, Ordering::Release);
                                     eprintln!("\nCritical error: Sanity check failed for '{}': output image appears to be all zeros", part_name);
                                     eprintln!("Stopping extraction to prevent corrupted output...");
@@ -1284,6 +1252,7 @@ impl Cmd {
         block_size: usize,
         partition_name: &str,
         source_dir: Option<&Path>,
+        simd: CpuSimd,
     ) -> Result<()> {
         let raw_extents = self.extract_dst_extents_raw(op, base_ptr, partition_len, block_size)?;
 
@@ -1295,22 +1264,23 @@ impl Cmd {
             .into_iter()
             .map(|(ptr, len)| unsafe { slice::from_raw_parts_mut(ptr, len) })
             .collect();
+        let total_dst_size: usize = dst_extents.iter().map(|e| e.len()).sum();
 
         // Now delegate to existing logic
         match Type::try_from(op.r#type)? {
             Type::Replace => {
                 let data = self.extract_data(op, payload)?;
-                self.run_op_replace_slice(data, &mut dst_extents, block_size)
+                self.run_op_replace_slice(data, &mut dst_extents, block_size, total_dst_size, simd)
             }
             Type::ReplaceBz => {
                 let data = self.extract_data(op, payload)?;
                 let mut decoder = BzDecoder::new(data);
-                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
+                self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)
             }
             Type::ReplaceXz => {
                 let data = self.extract_data(op, payload)?;
                 let mut decoder = xz2::read::XzDecoder::new(data);
-                self.run_op_replace(&mut decoder, &mut dst_extents, block_size)
+                self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)
             }
             Type::SourceCopy => {
                 let src_data = self.extract_src_data(
@@ -1319,7 +1289,13 @@ impl Cmd {
                     partition_name,
                     block_size,
                 )?;
-                self.run_op_replace_slice(&src_data, &mut dst_extents, block_size)
+                self.run_op_replace_slice(
+                    &src_data,
+                    &mut dst_extents,
+                    block_size,
+                    total_dst_size,
+                    simd,
+                )
             }
             Type::SourceBsdiff => {
                 let patch_data = self.extract_data(op, payload)?;
@@ -1329,11 +1305,28 @@ impl Cmd {
                     partition_name,
                     block_size,
                 )?;
-                let mut dst_data = Vec::new();
+
+                let mut dst_data = Vec::with_capacity(total_dst_size);
+
                 bsdiff_android::patch_bsdf2(&src_data, patch_data, &mut dst_data)
                     .context("failed to apply bsdiff")?;
-                self.run_op_replace_slice(&dst_data, &mut dst_extents, block_size)
+
+                ensure!(
+                    dst_data.len() == total_dst_size,
+                    "bsdiff produced {} bytes, expected {}",
+                    dst_data.len(),
+                    total_dst_size
+                );
+
+                self.run_op_replace_slice(
+                    &dst_data,
+                    &mut dst_extents,
+                    block_size,
+                    total_dst_size,
+                    simd,
+                )
             }
+
             Type::BrotliBsdiff => {
                 let patch_data = self.extract_data(op, payload)?;
                 let src_data = self.extract_src_data(
@@ -1342,29 +1335,73 @@ impl Cmd {
                     partition_name,
                     block_size,
                 )?;
-                let mut dst_data = Vec::new();
+
+                let mut dst_data = Vec::with_capacity(total_dst_size);
+
                 bsdiff_android::patch_bsdf2(&src_data, patch_data, &mut dst_data)
                     .context("failed to apply brotli bsdiff")?;
-                self.run_op_replace_slice(&dst_data, &mut dst_extents, block_size)
+
+                ensure!(
+                    dst_data.len() == total_dst_size,
+                    "bsdiff produced {} bytes, expected {}",
+                    dst_data.len(),
+                    total_dst_size
+                );
+
+                self.run_op_replace_slice(
+                    &dst_data,
+                    &mut dst_extents,
+                    block_size,
+                    total_dst_size,
+                    simd,
+                )
             }
+
             Type::Lz4diffBsdiff => {
                 let compressed_patch_data = self.extract_data(op, payload)?;
+
                 let patch_data = match lz4_flex::decompress_size_prepended(compressed_patch_data) {
-                    Ok(data) => data,
-                    Err(_) => lz4_flex::block::decompress(compressed_patch_data, usize::MAX)
+                    Ok(data) => {
+                        ensure!(
+                            data.len() <= total_dst_size,
+                            "LZ4 patch expands to {} bytes, exceeds expected {}",
+                            data.len(),
+                            total_dst_size
+                        );
+                        data
+                    }
+                    Err(_) => lz4_flex::block::decompress(compressed_patch_data, total_dst_size)
                         .context("failed to decompress LZ4 patch data")?,
                 };
+
                 let src_data = self.extract_src_data(
                     op,
                     source_dir.context("source_dir required for Lz4diffBsdiff")?,
                     partition_name,
                     block_size,
                 )?;
-                let mut dst_data = Vec::new();
+
+                let mut dst_data = Vec::with_capacity(total_dst_size);
+
                 bsdiff_android::patch_bsdf2(&src_data, &patch_data, &mut dst_data)
                     .context("failed to apply lz4 bsdiff")?;
-                self.run_op_replace_slice(&dst_data, &mut dst_extents, block_size)
+
+                ensure!(
+                    dst_data.len() == total_dst_size,
+                    "bsdiff produced {} bytes, expected {}",
+                    dst_data.len(),
+                    total_dst_size
+                );
+
+                self.run_op_replace_slice(
+                    &dst_data,
+                    &mut dst_extents,
+                    block_size,
+                    total_dst_size,
+                    simd,
+                )
             }
+
             Type::Zero | Type::Discard => Ok(()),
             Type::Puffdiff | Type::Zucchini => {
                 bail!("Unsupported operation type: Puffdiff/Zucchini not implemented")
@@ -1378,14 +1415,12 @@ impl Cmd {
         reader: &mut impl Read,
         dst_extents: &mut [&mut [u8]],
         block_size: usize,
+        simd: CpuSimd,
     ) -> Result<()> {
         let dst_len = dst_extents.iter().map(|e| e.len()).sum::<usize>();
-        let bytes_read = io::copy(reader, &mut ExtentsWriter::new(dst_extents))
+        let bytes_read = io::copy(reader, &mut ExtentsWriter::new(dst_extents, simd))
             .context("failed to write to buffer")? as usize;
-        let bytes_read_aligned = bytes_read
-            .saturating_add(block_size.saturating_sub(1))
-            .saturating_div(block_size)
-            .saturating_mul(block_size);
+        let bytes_read_aligned = (bytes_read + block_size - 1) / block_size * block_size;
         ensure!(
             bytes_read_aligned == dst_len,
             "more dst blocks than data, even with padding"
@@ -1398,24 +1433,35 @@ impl Cmd {
         data: &[u8],
         dst_extents: &mut [&mut [u8]],
         block_size: usize,
+        total_dst_size: usize,
+        simd: CpuSimd,
     ) -> Result<()> {
         let bytes_read = data.len();
-        let dst_len: usize = dst_extents.iter().map(|e| e.len()).sum();
-        let bytes_read_aligned = bytes_read
-            .saturating_add(block_size.saturating_sub(1))
-            .saturating_div(block_size)
-            .saturating_mul(block_size);
+
+        let bytes_read_aligned = (bytes_read + block_size - 1) / block_size * block_size;
+
         ensure!(
-            bytes_read_aligned == dst_len,
+            bytes_read_aligned == total_dst_size,
             "more dst blocks than data, even with padding"
         );
-        let written = ExtentsWriter::new(dst_extents)
+
+        // FAST PATH: single contiguous extent
+        if dst_extents.len() == 1 {
+            let dst = &mut dst_extents[0];
+            dst[..bytes_read].copy_from_slice(data);
+            return Ok(());
+        }
+
+        // GENERIC PATH: multiple extents
+        let written = ExtentsWriter::new(dst_extents, simd)
             .write(data)
             .context("failed to write to buffer")?;
+
         ensure!(
             written == bytes_read,
             "failed to write all data to destination extents"
         );
+
         Ok(())
     }
 
@@ -1507,7 +1553,7 @@ impl Cmd {
         let filename = Path::new(&update.partition_name).with_extension("img");
         let path: PathBuf = partition_dir.as_ref().join(filename);
 
-        let mmap = {
+        let mut mmap = {
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -1518,6 +1564,18 @@ impl Cmd {
             unsafe { MmapMut::map_mut(&file) }
                 .with_context(|| format!("failed to mmap file: {path:?}"))?
         };
+        #[cfg(target_os = "linux")]
+        {
+            use libc::{MADV_SEQUENTIAL, madvise};
+            unsafe {
+                madvise(
+                    mmap.as_mut_ptr() as *mut libc::c_void,
+                    mmap.len(),
+                    MADV_SEQUENTIAL,
+                );
+            }
+        }
+
         let partition = Arc::new(mmap);
         Ok((partition, partition_len as usize, path))
     }
