@@ -1,6 +1,6 @@
 [package]
 name = "otaripper"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.92.0"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
@@ -13,8 +13,7 @@ readme = "README.md"
 
 [dependencies]
 anyhow = "1.0.100"
-bsdiff = "0.2.1"
-brotli = "3"
+bsdiff-android = "0.0.2"
 bzip2 = "0.6.1"
 chrono = "0.4.42"
 clap = { version = "4.5.54", features = ["derive"] }
@@ -26,7 +25,7 @@ hex = "0.4.3"
 indicatif = "0.18.3"
 memmap2 = { version = "0.9.9", features = ["stable_deref_trait"] }
 mimalloc = { version = "0.1.48", features = ["v3"] }
-prost = "0.14.1"
+prost = "0.14.3"
 rayon = "1.11.0"
 ring = "0.17.14"
 sysinfo = "0.37.2"
@@ -37,13 +36,14 @@ zip = { version = "7.0.0", default-features = false, features = [
   "bzip2",
   "zstd",
 ] }
+lz4_flex = { version = "0.12.0", default-features = false }
 
 # Compatibility: Static liblzma only on musl to avoid glibc x86-64-v4 issues
 [target.'cfg(target_env = "musl")'.dependencies]
 xz2 = { version = "0.1.7", features = ["static"] }
 
 [build-dependencies]
-prost-build = "0.14.1"
+prost-build = "0.14.3"
 
 [profile.release]
 opt-level = 3
@@ -52,5 +52,6 @@ codegen-units = 1
 strip = true
 debug = false
 panic = "abort"
-overflow-checks = true
+overflow-checks = false
 incremental = false
+
