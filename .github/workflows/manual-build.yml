@@ -8,6 +8,9 @@ on:
         required: false
         default: "Manual build"
 
+permissions:
+  contents: read
+
 env:
   BIN_NAME: otaripper
 
