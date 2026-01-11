@@ -50,5 +50,5 @@ codegen-units = 1
 strip = true
 debug = false
 panic = "abort"
-overflow-checks = true
+overflow-checks = false
 incremental = false
