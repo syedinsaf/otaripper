@@ -7,8 +7,6 @@
 
 # otaripper
 
-**Fast, safe, and reliable Android OTA partition extractor**
-
 Extract partitions from Android OTA files with cryptographic verification, strong reliability guarantees, and high-performance execution.
 
 [![GitHub release](https://img.shields.io/github/v/release/syedinsaf/otaripper?style=for-the-badge)](https://github.com/syedinsaf/otaripper/releases)
