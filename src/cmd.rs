@@ -607,19 +607,11 @@ impl Cmd {
             DeltaArchiveManifest::decode(payload.manifest).context("unable to parse manifest")?;
 
         // 1. Identify if the payload contains any incremental operations
-        let has_incremental_ops = manifest.partitions.iter().any(|p| {
-            p.operations.iter().any(|op| {
-                matches!(
-                    Type::try_from(op.r#type),
-                    Ok(Type::SourceCopy
-                        | Type::SourceBsdiff
-                        | Type::BrotliBsdiff
-                        | Type::Lz4diffBsdiff
-                        | Type::Puffdiff
-                        | Type::Zucchini)
-                )
-            })
-        });
+        let has_incremental_ops = manifest
+            .partitions
+            .iter()
+            .any(Self::is_incremental_partition);
+
         let block_size = manifest.block_size.context(
             "The update file is missing critical metadata (block_size). It is likely corrupted.",
         )? as usize;
@@ -658,16 +650,7 @@ impl Cmd {
                 };
 
                 // Check for operations that rely on source data (meaning it's a patch/delta)
-                let is_patch = partition.operations.iter().any(|op| {
-                    matches!(
-                        Type::try_from(op.r#type),
-                        Ok(Type::SourceCopy
-                            | Type::SourceBsdiff
-                            | Type::BrotliBsdiff
-                            | Type::Puffdiff
-                            | Type::Zucchini)
-                    )
-                });
+                let is_patch = Self::is_incremental_partition(partition);
 
                 let type_label = if is_patch {
                     Style::new().bold().red().apply_to("Incremental")
@@ -931,6 +914,14 @@ impl Cmd {
                 threadpool.current_num_threads()
             );
         }
+        if let Some(src) = &effective_source_dir {
+            eprintln!(
+                "{} Applying incremental OTA using source images from:\n    {}",
+                Style::new().bold().yellow().apply_to("ℹ️"),
+                src.display()
+            );
+            eprintln!("    Partitions will be reconstructed using binary diffs.\n");
+        }
 
         let bold_bright_red = Style::new().bold().red();
         let bold_yellow = Style::new().bold().yellow();
@@ -954,7 +945,8 @@ impl Cmd {
                 let draw_target = ProgressDrawTarget::stderr_with_hz(hz);
                 MultiProgress::with_draw_target(draw_target)
             };
-            let source_dir_arc = Arc::new(effective_source_dir);
+            let source_dir_arc = Arc::new(effective_source_dir.clone());
+
             // Maintain the manifest/extraction order for neatly printing hashes later
             for (hash_index_counter, update) in manifest
                 .partitions
@@ -988,13 +980,14 @@ impl Cmd {
                 let remaining_ops = Arc::new(AtomicUsize::new(update.operations.len()));
                 let base_addr = partition_file.as_ptr() as usize;
                 let partition_len_final = partition_len;
+                let part_name = Arc::new(update.partition_name.clone());
+
                 for op in update.operations.iter() {
                     let progress_bar = progress_bar.clone();
                     let partition_file = Arc::clone(&partition_file);
                     let remaining_ops = Arc::clone(&remaining_ops);
 
-
-                    let part_name = update.partition_name.clone();
+                    let part_name = Arc::clone(&part_name);
                     let stats_sender = stats_sender.clone();
                     let partition_len_for_stats = partition_len;
                     let hash_sender = hash_sender.clone();
@@ -1020,7 +1013,7 @@ impl Cmd {
                             base_ptr,
                             partition_len,
                             block_size,
-                            &part_name,
+                            part_name.as_str(),
                             source_dir,
                             simd,
                         );
@@ -1031,7 +1024,7 @@ impl Cmd {
                                 let op_type = Type::try_from(op.r#type)
                                     .map(|t| format!("{:?}", t))
                                     .unwrap_or_else(|_| format!("type {}", op.r#type));
-                                let msg = format!("❌ Error in partition '{}': {} operation failed: {}", part_name, op_type, e);
+                                let msg = format!("❌ Error in partition '{}': {} operation failed: {}", part_name.as_str(), op_type, e);
                                 // Store the first error message
                                 let mut error_lock = error_message.lock().unwrap();
                                 if error_lock.is_none() {
@@ -1107,13 +1100,13 @@ impl Cmd {
                                         arr
                                     };
                                 let hexstr = hex::encode(digest);
-                                let _ = sender.send(HashRec { order: part_index, name: part_name.clone(), hex: hexstr });
+                                let _ = sender.send(HashRec { order: part_index, name: part_name.as_str().to_owned(), hex: hexstr });
                             }
 
                             // 4) Stats collection (optional)
                             if let (Some(start), Some(sender)) = (part_start, stats_sender.as_ref()) {
                                 let elapsed = start.elapsed();
-                                let _ = sender.send(Stat { name: part_name.clone(), bytes: partition_len_for_stats as u64, ms: elapsed.as_millis() });
+                                let _ = sender.send(Stat { name: part_name.as_str().to_owned(), bytes: partition_len_for_stats as u64, ms: elapsed.as_millis() });
                             }
                         }
 
@@ -1208,6 +1201,24 @@ impl Cmd {
             state.0.clear(); // Clear the file list so no cleanup happens
         }
 
+        // Incremental OTA summary (only after successful extraction)
+        if effective_source_dir.is_some() {
+            let merged = manifest
+                .partitions
+                .iter()
+                .filter(|p| {
+                    self.partitions.is_empty() || self.partitions.contains(&p.partition_name)
+                })
+                .filter(|p| Self::is_incremental_partition(p))
+                .count();
+
+            println!(
+                "{} Successfully merged {} partition(s) from incremental OTA",
+                Style::new().bold().green().apply_to("✓"),
+                merged
+            );
+        }
+
         // Calculate and display extracted folder size
         self.display_extracted_folder_size(&partition_dir)?;
 
@@ -1221,15 +1232,26 @@ impl Cmd {
 
     fn create_progress_bar(&self, update: &PartitionUpdate) -> Result<ProgressBar> {
         let finish = ProgressFinish::AndLeave;
+
+        let is_incremental = Self::is_incremental_partition(update);
+
+        let prefix = if is_incremental {
+            format!("{} (merging)", update.partition_name)
+        } else {
+            update.partition_name.to_string()
+        };
+
         let style = ProgressStyle::with_template(
-            "{prefix:>16!.green.bold} [{wide_bar:.white.dim}] {percent:>3.white}%",
+            "{prefix:>24!.green.bold} [{wide_bar:.white.dim}] {percent:>3.white}%",
         )
         .context("unable to build progress bar template")?
         .progress_chars("=> ");
+
         let bar = ProgressBar::new(update.operations.len() as u64)
             .with_finish(finish)
-            .with_prefix(update.partition_name.to_string())
+            .with_prefix(prefix)
             .with_style(style);
+
         Ok(bar)
     }
 
@@ -1727,6 +1749,20 @@ impl Cmd {
     fn verify_sha256(&self, data: &[u8], exp_hash: &[u8]) -> Result<()> {
         self.verify_sha256_returning(data, exp_hash)?;
         Ok(())
+    }
+    #[inline]
+    fn is_incremental_partition(p: &PartitionUpdate) -> bool {
+        p.operations.iter().any(|op| {
+            matches!(
+                Type::try_from(op.r#type),
+                Ok(Type::SourceCopy
+                    | Type::SourceBsdiff
+                    | Type::BrotliBsdiff
+                    | Type::Lz4diffBsdiff
+                    | Type::Puffdiff
+                    | Type::Zucchini)
+            )
+        })
     }
 
     /// Validates that all dst_extents across all InstallOperations are non-overlapping.
