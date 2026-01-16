@@ -68,7 +68,7 @@ Incremental OTA packages are intentionally not supported.
 | Selective extraction    | Yes                   | Yes               | Yes                     |
 | Direct ZIP support      | Yes                   | Yes               | No                      |
 | Multi-threaded          | Yes                   | Yes               | No (single-threaded)    |
-| Cross-platform          | Win/Linux/macOS       | Yes               | Requires Python         |
+| Cross-platform          | Yes                   | Yes               | Requires Python         |
 | Standalone binary       | Yes                   | Yes               | No                      |
 
 > otaripper is designed to avoid producing corrupted or partially valid images. Failure handling is deliberate and conservative.
