@@ -1,4 +1,3 @@
-// payload.rs
 use anyhow::{Result, anyhow, bail, Context};
 
 const PAYLOAD_MAGIC: &[u8] = b"CrAU";
