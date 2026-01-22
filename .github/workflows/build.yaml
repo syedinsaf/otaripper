@@ -1,5 +1,5 @@
 name: Build & Release otaripper
-run-name: "otaripper ${{ github.ref_name }} — release build"
+run-name: "otaripper ${{ github.ref_name }}"
 on:
   push:
     tags:
