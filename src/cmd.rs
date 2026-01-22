@@ -407,6 +407,7 @@ fn is_all_zero_with_simd(simd: CpuSimd, data: &[u8]) -> bool {
     #[cfg(not(target_arch = "x86_64"))]
     {
         // Non-x86 always scalar (auto-vectorized by LLVM)
+        let _ = simd;
         data.iter().all(|&b| b == 0)
     }
 }
