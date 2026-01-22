@@ -389,6 +389,3 @@ Likely causes:
 For user-facing documentation, see **README.md**.
 
 ---
-
-
-Just say the word.
