@@ -1682,6 +1682,7 @@ impl Cmd {
         let filename = Path::new(&update.partition_name).with_extension("img");
         let path: PathBuf = partition_dir.as_ref().join(filename);
 
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mut mmap = {
             let file = OpenOptions::new()
                 .read(true)
