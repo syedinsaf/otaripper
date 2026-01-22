@@ -362,6 +362,7 @@ fn simd_copy_large(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 fn simd_copy_chunk(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
     match simd {
@@ -382,6 +383,12 @@ fn simd_copy_chunk(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
         CpuSimd::Sse2 => unsafe { simd_copy_sse2(src, dst) },
         CpuSimd::None => dst.copy_from_slice(src),
     }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[inline(always)]
+fn simd_copy_chunk(_simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
+    dst.copy_from_slice(src);
 }
 
 /// Zero-check with SIMD already selected (hot path)
