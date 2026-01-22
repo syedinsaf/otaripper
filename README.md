@@ -34,6 +34,7 @@ Extract partitions from Android OTA files with cryptographic verification, stron
 * [Building from Source](#building-from-source)
 * [Contributing](#contributing)
 * [Acknowledgments](#acknowledgments)
+* [Show Your Support](#show-your-support)
 * [License](#license)
 * [Disclaimer](#disclaimer)
 
