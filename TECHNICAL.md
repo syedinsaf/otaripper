@@ -1,6 +1,12 @@
 # Technical Documentation
 
-This document provides detailed technical information about otaripper's architecture, design decisions, and implementation details.
+This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
+
+> **v2.1 Note**
+> Version 2.1 focuses on *execution-level refinements* rather than architectural changes.
+> The core design remains unchanged, but hot paths have been tightened, cache behavior improved, and performance heuristics made more explicit and predictable.
+
+---
 
 ## Table of Contents
 
@@ -12,24 +18,33 @@ This document provides detailed technical information about otaripper's architec
 * [Reliability and Failure Handling](#reliability-and-failure-handling)
 * [Performance Architecture](#performance-architecture)
 * [Advanced Configuration](#advanced-configuration)
+* [Design Decisions](#design-decisions)
+* [Future Optimizations](#future-optimizations)
+* [Troubleshooting](#troubleshooting)
+* [References](#references)
 
 ---
 
 ## Architecture Overview
 
-otaripper is structured around three core principles:
+otaripper is structured around three core principles, refined in v2.1 to favor **predictable performance** over generalized abstractions:
 
-1. **Safety First**: Memory safety through Rust's type system, comprehensive verification
-2. **Zero-Copy I/O**: Memory-mapped file operations to minimize overhead
-3. **Contention-Free Concurrency**: Parallel extraction with workers operating on disjoint regions
+1. **Safety First**
+   Memory safety enforced by Rust’s type system, strict validation, and explicit lifetime control.
+
+2. **Zero-Copy I/O**
+   Memory-mapped file operations to minimize data movement and kernel/user transitions.
+
+3. **Contention-Free Concurrency**
+   Parallel extraction with workers operating exclusively on disjoint memory regions.
 
 ### Key Components
 
-* **Payload Parser**: Parses Android OTA manifest and payload structure
-* **Memory Mapper**: Manages memory-mapped I/O for input and output files
-* **Worker Pool**: Executes extraction operations in parallel
-* **Verification Engine**: SHA-256 validation and sanity checking
-* **Progress Monitor**: Lock-free progress tracking
+* **Payload Parser** — Parses Android OTA manifests and payload structures
+* **Memory Mapper** — Manages memory-mapped I/O for payloads and output partitions
+* **Worker Pool** — Executes extraction operations in parallel
+* **Verification Engine** — SHA-256 validation and sanity checking
+* **Progress Monitor** — Lock-free progress tracking with minimal redraw overhead
 
 ---
 
@@ -37,56 +52,71 @@ otaripper is structured around three core principles:
 
 ### Zero-Copy Memory Mapping
 
-otaripper uses memory-mapped I/O to avoid unnecessary data copying:
+otaripper avoids traditional buffered I/O in favor of memory mapping:
 
 ```
-Traditional Approach:
-  File → read() → Kernel Buffer → User Buffer → Process
-  (Multiple copies, high overhead)
+Traditional:
+  File → read() → Kernel Buffer → User Buffer → Copy → Process
 
-otaripper Approach:
+otaripper:
   File → mmap() → Direct Process Access
-  (Zero-copy, minimal overhead)
 ```
 
-**Benefits:**
+**Benefits**
 
-* **60-80% fewer memory copies**: Direct access to file data
-* **Lower RAM usage**: Pages loaded on-demand by the OS
-* **OS-level caching**: Kernel manages page cache automatically
-* **Safe concurrent reads**: Read-only mappings prevent data races
+* Zero-copy reads
+* OS-managed page cache
+* Lower memory pressure
+* Safe concurrent reads via read-only mappings
 
-**Implementation Details:**
+**Implementation Details**
 
-* Input payload: Read-only memory mapping
-* Output partitions: Write-only memory mapping with pre-allocation
-* Extent validation: Ensures non-overlapping memory regions at startup
-* Page-aligned operations: 4KB boundaries for optimal performance
+* Input payload: read-only `mmap`
+* Output partitions: write-only `mmap` with pre-allocation
+* Strict extent validation before any write occurs
+* Page-aligned access patterns (typically 4 KB)
+
+---
 
 ### Memory Layout
 
 ```
 ┌─────────────────────────────────────┐
-│   Input: payload.bin (mmap)         │
-│   - Read-only mapping               │
-│   - Shared across all workers       │
-│   - Kernel manages paging           │
+│ Input: payload.bin (read-only mmap) │
+│ - Shared across all workers         │
+│ - OS-managed paging                │
 └─────────────────────────────────────┘
-             ↓
+                ↓
 ┌─────────────────────────────────────┐
-│   Worker Threads (N parallel)       │
-│   - Each processes disjoint extents │
-│   - No locking in the hot path
-│   - Independent decompression       │
+│ Worker Threads (N parallel)         │
+│ - Disjoint extents only             │
+│ - No locks in hot path              │
+│ - Thread-local decompression        │
 └─────────────────────────────────────┘
-             ↓
+                ↓
 ┌─────────────────────────────────────┐
-│   Output: partition.img (mmap)      │
-│   - Write-only mapping              │
-│   - Pre-allocated to full size      │
-│   - Non-overlapping write regions   │
+│ Output: partition.img (write mmap)  │
+│ - Pre-sized to final length         │
+│ - No overlapping writes             │
 └─────────────────────────────────────┘
 ```
+
+---
+
+### Fast-Path Write Specialization (v2.1)
+
+In v2.1, otaripper introduces a dedicated fast path for the most common case:
+**operations that write to a single contiguous destination extent**.
+
+When an operation resolves to exactly one destination extent, otaripper bypasses
+the generic multi-extent writer and performs a direct slice write. This eliminates:
+
+* Iterator overhead
+* Per-extent state tracking
+* Redundant bounds checks
+
+This specialization significantly reduces instruction count for large partitions,
+where most operations are contiguous.
 
 ---
 
@@ -94,194 +124,145 @@ otaripper Approach:
 
 ### Automatic CPU Detection
 
-otaripper detects CPU capabilities at startup and selects the optimal code path:
+CPU capabilities are detected once at startup and cached globally:
 
-```rust
-CPU Feature Detection:
-┌─────────────────────────────────────┐
-│ 1. Check AVX-512F + AVX-512BW       │
-│    ├─ Available? → 512-bit SIMD     │ (8x throughput)
-│    └─ Not available → Check AVX2    │
-│                                     │
-│ 2. Check AVX2                       │
-│    ├─ Available? → 256-bit SIMD     │ (4x throughput)
-│    └─ Not available → Check SSE2    │
-│                                     │
-│ 3. Check SSE2                       │
-│    ├─ Available? → 128-bit SIMD     │ (2x throughput)
-│    └─ Not available → Scalar        │
-│                                     │
-│ 4. Fallback: Scalar operations      │ (1x baseline)
-└─────────────────────────────────────┘
 ```
+Priority Order:
+  AVX-512 (512-bit)
+  AVX2    (256-bit)
+  SSE2    (128-bit)
+  Scalar  (fallback)
+```
+
+Detection uses `is_x86_feature_detected!` and is fully runtime-safe.
+
+---
 
 ### SIMD Applications
 
-**1. Memory Operations**
-* SIMD-accelerated large block copying (SSE2/AVX2/AVX-512)
-* Streaming non-temporal writes (`_mm*_stream_si*`)
-* Cache-friendly chunking for optimal performance
-* Processes 16-64 bytes per instruction depending on CPU
+**1. Memory Copying**
 
-**2. All-Zero Detection (Sanity Checking)**
-* SIMD-accelerated corruption detection
-* Processes 16-64 bytes per instruction
-* Near-zero overhead for safety checks
-* Catches obviously invalid partition images
+* SIMD-accelerated block copying
+* Streaming non-temporal stores for large write-once buffers
+* Chunked writes to avoid long pipeline stalls
+* 16–64 bytes per instruction depending on SIMD width
 
-**3. SHA-256 Verification**
+**2. All-Zero Detection**
 
-otaripper uses the `sha2` Rust crate for SHA-256 verification. This is a well-maintained, standards-compliant, and constant-time implementation.
+* SIMD-accelerated sanity checks
+* Near-zero overhead
+* Detects obviously invalid images (e.g. all-zero partitions)
 
-Hashing is not SIMD-parallelized. Performance is generally dominated by I/O and decompression, so SHA-256 rarely becomes the bottleneck in practice. On NVMe SSDs, hashing typically still runs near storage speed, so verification does not meaningfully slow extraction.
+**3. Hashing**
+
+SHA-256 uses a constant-time, standards-compliant implementation.
+Hashing is not SIMD-parallelized; in practice, I/O and decompression dominate runtime.
+
+---
+
+### Cache-Aware Write Thresholds (v2.1)
+
+otaripper uses a **1 MiB threshold** to decide when to use streaming (non-temporal)
+SIMD stores instead of normal cached writes.
+
+This value is chosen because:
+
+* It exceeds typical L2 cache sizes
+* It amortizes SIMD setup and fencing costs
+* Writes of this size are almost always write-once
+* Avoids evicting hot metadata and worker state from cache
+
+For smaller writes, cached stores are faster due to lower latency.
+
+This heuristic is intentionally conservative and tuned for real OTA workloads.
+
+---
 
 ### Debug CPU Detection
 
 ```bash
-# See detected CPU features
 OTARIPPER_DEBUG_CPU=1 ./otaripper ota.zip
-
-# Example output:
-# CPU Features detected:
-#   AVX-512: Yes
-#   AVX2: Yes
-#   SSE2: Yes
-# Using: AVX-512 optimized path
 ```
+
+Outputs detected SIMD capabilities and the selected execution path.
 
 ---
 
 ## Verification Pipeline
 
-otaripper implements a three-layer verification system:
+otaripper implements a three-layer verification system.
 
-### Layer 1: Input Verification (Always Enabled)
+### Layer 1: Input Validation (Always Enabled)
 
-```
-┌─────────────────────────────────────┐
-│ 1. Parse payload.bin manifest       │
-│    - Verify protobuf structure      │
-│    - Validate partition metadata    │
-│    - Check extent boundaries        │
-│                                     │
-│ 2. Validate manifest hashes         │
-│    - Verify hash presence           │
-│    - Check hash format (SHA-256)    │
-│    - Validate extent checksums      │
-└─────────────────────────────────────┘
-```
+* Protobuf structure validation
+* Manifest consistency checks
+* Extent boundary verification
+* Block-size sanity checks
 
-**Purpose**: Catch corrupted or malformed input files before extraction begins.
+Purpose: reject malformed or corrupted inputs before extraction begins.
 
-### Layer 2: Operation Verification (Default: Enabled)
+---
 
-```
-┌─────────────────────────────────────┐
-│ For each operation:                 │
-│   1. Read compressed extent data    │
-│   2. Verify data hash (if present)  │
-│   3. Decompress (bzip2/xz/raw)      │
-│   4. Write to output partition      │
-│      - SIMD-accelerated copy        │
-│      - Streaming writes for large   │
-│        blocks (cache bypass)        │
-└─────────────────────────────────────┘
-```
+### Layer 2: Operation Verification (Default)
 
-**Purpose**: Ensure data integrity during extraction. Disabled with `--no-verify`.
+* Data hash verification (if present)
+* Decompression integrity
+* Safe write enforcement
 
-### Layer 3: Output Verification (Default: Enabled)
+Disabled only with `--no-verify`.
 
-```
-┌─────────────────────────────────────┐
-│ After extraction completes:         │
-│   1. Compute SHA-256 of output file │
-│   2. Compare with manifest hash     │
-│   3. Perform sanity checks (optional)│
-│      - All-zero detection           │
-│      - Size validation              │
-│   4. Report verification status     │
-└─────────────────────────────────────┘
-```
+---
 
-**Purpose**: Verify final output integrity. Enforced with `--strict`.
+### Layer 3: Output Verification (Default)
+
+* Final SHA-256 verification
+* Optional sanity checks (`--sanity`)
+* Strict enforcement with `--strict`
+
+---
 
 ### Verification Modes
 
-| Mode | Layer 1 | Layer 2 | Layer 3 | Use Case |
-|------|---------|---------|---------|----------|
-| Default | ✅ | ✅ | ✅ | Standard extraction |
-| `--strict` | ✅ | ✅ | ✅ (enforced) | Maximum safety |
-| `--no-verify` | ✅ | ❌ | ❌ | Trusted sources only |
-| `--sanity` | ✅ | ✅ | ✅ + extra checks | Forensic analysis |
+| Mode          | Input | Ops | Output      | Use Case        |
+| ------------- | ----- | --- | ----------- | --------------- |
+| Default       | ✅     | ✅   | ✅           | Normal use      |
+| `--strict`    | ✅     | ✅   | enforced    | Maximum safety  |
+| `--no-verify` | ✅     | ❌   | ❌           | Trusted sources |
+| `--sanity`    | ✅     | ✅   | +zero-check | Analysis        |
 
 ---
 
 ## Parallel Extraction
 
-### Contention-Free Worker Design
+### Contention-Free Design
 
-otaripper uses a contention-free architecture for maximum concurrency:
+Workers operate on **disjoint memory regions** proven safe by upfront validation.
 
 ```
 Main Thread:
-  ├─ Parse manifest
-  ├─ Validate extents (ensure no overlap)
-  ├─ Create memory-mapped output files
-  ├─ Spawn worker threads
-  └─ Wait for completion
+  Parse → Validate → mmap → Spawn workers
 
-Worker Thread (per operation):
-  ├─ Read compressed data from payload (read-only mmap)
-  ├─ Decompress in thread-local buffer
-  ├─ Write to partition file (write-only mmap, disjoint regions)
-  ├─ Update progress (atomic counter)
-  └─ Signal completion (lockless queue)
+Worker:
+  Read → Decompress → Write → Progress update
 ```
 
-### Concurrency Guarantees
+### Why This Is Safe
 
-**No Contention in Hot Path Because:**
+* Non-overlapping extents validated before execution
+* Read-only payload mapping
+* Write-only output mapping
+* Scoped threads prevent lifetime violations
 
-1. **Disjoint Memory Regions**: Each worker writes to non-overlapping extents
-2. **Read-Only Input**: All workers share read-only payload mapping
-3. **Atomic Progress Updates**: Lock-free counters for progress tracking
-4. **Independent Decompression**: Each worker has private decompressor state
+Extraction is aborted *before any write occurs* if overlapping extents are detected.
 
-Workers operate on disjoint regions, avoiding shared locks in the hot path. Synchronization only occurs at partition completion for final verification.
-
-**Validation at Startup:**
-
-```rust
-// Pseudo-code for extent validation
-for each operation:
-    for each other_operation:
-        if ranges_overlap(operation, other_operation):
-            panic!("Invalid manifest: overlapping extents")
-```
+---
 
 ### Thread Pool Configuration
 
-**Auto-Detection (Default)**:
-* Uses `num_cpus::get()` to detect logical cores
-* Optimal for most systems
-
-**Manual Override**:
-```bash
-# Use 8 worker threads
-./otaripper ota.zip -t 8
-
-# Use 1 thread (sequential)
-./otaripper ota.zip -t 1
-
-# Use 32 threads (high-core systems)
-./otaripper ota.zip -t 32
-```
-
-**Performance Notes**:
-* Benefits diminish beyond ~16 threads on most systems (I/O bound)
-* SSD storage scales better with higher thread counts
-* HDD storage may perform worse with excessive threads (seek overhead)
+* Auto-detected by default
+* Manually configurable via `-t`
+* Benefits taper beyond ~16 threads on most systems
+* SSDs scale better than HDDs
 
 ---
 
@@ -289,139 +270,43 @@ for each operation:
 
 ### Error Handling Philosophy
 
-otaripper follows a "fail-fast, clean-up always" approach:
+otaripper follows **fail-fast, clean-up always** semantics.
 
-1. **Detect errors early**: Validate before extraction begins
-2. **Stop immediately**: Don't continue with invalid state
-3. **Clean up completely**: Remove partial files
-4. **Report clearly**: Provide actionable error messages
+### Transactional Extraction Semantics
 
-### Failure Scenarios
+* On failure or interruption:
 
-**Scenario 1: Verification Failure**
-```
-Event: Output hash doesn't match manifest
-Action:
-  1. Stop all workers
-  2. Delete corrupted partition file
-  3. Report which partition failed
-  4. Exit with error code
-```
+  * All created partition files are deleted
+  * Output directory is removed if created by otaripper
+* On success:
 
-**Scenario 2: Interrupted Extraction (Ctrl+C)**
-```
-Event: User presses Ctrl+C
-Action:
-  1. Catch SIGINT signal
-  2. Signal all workers to stop
-  3. Wait for workers to finish current operation
-  4. Delete ALL partition files created (including successful ones)
-  5. Delete output directory if otaripper created it
-  6. Print cleanup status
-  7. Exit gracefully
-```
+  * All outputs remain intact
 
-**Scenario 3: Disk Full**
-```
-Event: Write operation fails (ENOSPC)
-Action:
-  1. Stop all workers immediately
-  2. Delete ALL partition files created
-  3. Delete output directory if otaripper created it
-  4. Report disk space issue
-  5. Exit with error code
-```
-
-**Scenario 4: Invalid Manifest**
-```
-Event: Extent overlap detected
-Action:
-  1. Fail before any extraction begins
-  2. Report manifest validation error
-  3. Exit immediately (no cleanup needed)
-```
-
-### Cleanup Guarantees
-
-otaripper guarantees **all-or-nothing extraction safety**. If extraction fails, nothing risky is left behind.
-
-**If extraction is interrupted or fails:**
-* ✅ All created partition images are deleted (even successfully extracted ones)
-* ✅ Temporary files and memory mappings are cleaned
-* ✅ Output directory is removed if otaripper created it
-* ✅ No "half-good / half-corrupt" situation possible
-
-**If extraction succeeds:**
-* ✅ Everything remains intact
-* ✅ Folder auto-opens (unless `-n`)
-
-**Edge case: Existing output directory**
-* If directory already existed before extraction:
-  * All created files are still deleted on failure
-  * Directory itself is kept (since user created it)
-* If otaripper created the directory:
-  * Entire directory is removed on failure
+No partial or ambiguous state is ever left behind.
 
 ---
 
 ## Performance Architecture
 
-### Bottleneck Analysis
+### Common Bottlenecks
 
-otaripper performance is typically bounded by:
-
-1. **Storage I/O** (most common bottleneck)
-   * Read speed of input OTA file
-   * Write speed of output partition files
-   * Sequential vs random access patterns
-
-2. **Decompression** (for heavily compressed OTAs)
-   * bzip2: CPU-intensive, slower
-   * xz/lzma: CPU-intensive, slower
-   * uncompressed: No overhead
-
-3. **CPU** (least common bottleneck)
-   * Hash computation (SHA-256)
-   * SIMD optimization helps significantly
+1. Storage I/O (most common)
+2. Decompression (bzip2/xz)
+3. CPU (least common)
 
 ### Optimization Strategies
 
-**1. Memory-Mapped I/O**
-* Eliminates user-kernel copies
-* Leverages OS page cache
-* Reduces context switches
+1. Memory-mapped I/O
+2. Contention-free parallelism
+3. SIMD acceleration
+4. Extent coalescing
+5. **Hot-path specialization (v2.1)**
 
-**2. Contention-Free Design**
-* Workers operate on disjoint memory regions
-* No shared locks in the hot path
-* Scales linearly with cores (up to I/O limit)
+---
 
-**3. SIMD Acceleration**
-* Accelerated memory copying (SSE2 / AVX2 / AVX-512)
-* Non-temporal streaming writes for very large blocks
-* SIMD-accelerated zero detection
-* Reduces CPU overhead during extraction
+### Built-in Statistics (`--stats`)
 
-**4. Extent Coalescing**
-* Groups contiguous extents
-* Reduces number of operations
-* Better cache locality
-
-### Performance Measurement
-
-**Built-in Statistics** (`--stats`):
-```
-Extraction statistics:
-  - boot: 64.0 MB in 45 ms (1.42 GB/s)
-  - vendor_boot: 128.0 MB in 67 ms (1.91 GB/s)
-  - system: 2.1 GB in 1205 ms (1.74 GB/s)
-  Total: 2.29 GB in 1317 ms (1.74 GB/s)
-```
-
-**Interpretation**:
-* **< 500 MB/s**: Likely HDD-bound or compressed data
-* **500-1500 MB/s**: SATA SSD or moderately compressed
-* **> 1500 MB/s**: NVMe SSD with uncompressed data
+Reports per-partition and total throughput to identify bottlenecks.
 
 ---
 
@@ -429,152 +314,81 @@ Extraction statistics:
 
 ### Environment Variables
 
-**`OTARIPPER_DEBUG_CPU`**
-```bash
-OTARIPPER_DEBUG_CPU=1 ./otaripper ota.zip
-```
-Enables CPU feature detection logging.
+* `OTARIPPER_DEBUG_CPU` — show SIMD selection
 
 ### Build-Time Optimizations
 
-**Target CPU Features** (requires nightly Rust):
-```bash
-# Enable all CPU features available on build machine
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-
-# Optimize for specific CPU
-RUSTFLAGS="-C target-cpu=haswell" cargo build --release
-```
-
-**Link-Time Optimization**:
 ```toml
-# Add to Cargo.toml
 [profile.release]
 lto = "fat"
 codegen-units = 1
 ```
 
-**Platform-Specific Tuning**:
-
-Linux:
-```bash
-# Use mold linker for faster builds
-mold -run cargo build --release
-```
-
-Windows:
-```bash
-# Use MSVC with PGO (Profile-Guided Optimization)
-cargo pgo build
-```
+Optional `target-cpu=native` for local builds.
 
 ---
 
 ## Design Decisions
 
-### Why Memory-Mapped I/O?
+### Why mmap?
 
-**Advantages**:
-* Zero-copy operations
-* OS manages caching
-* Simplified code (no manual buffering)
+* Zero-copy
+* OS-managed caching
+* Simplified correctness model
 
-**Disadvantages**:
-* Less portable (works well on modern OSes)
-* Can't use async I/O easily
-* Requires careful extent validation
+### Why Contention-Free Writes?
 
-**Decision**: Benefits outweigh drawbacks for this use case.
-
-### Why Contention-Free Design?
-
-**Advantages**:
-* Better scalability
-* No lock contention
-* Simpler reasoning about correctness
-
-**Disadvantages**:
-* Requires careful validation
-* More complex error handling
-
-**Decision**: Android OTA structure (disjoint extents) makes this safe and beneficial.
+* No locks in hot path
+* Predictable performance
+* Strong correctness guarantees
 
 ### Why Rust?
 
-**Key Benefits**:
-* Memory safety without garbage collection
+* Memory safety without GC
 * Zero-cost abstractions
-* Excellent tooling and ecosystem
-* Strong type system prevents common bugs
-
-**Trade-offs**:
-* Steeper learning curve
-* Longer compile times
-
-**Decision**: Safety and performance requirements justify the choice.
+* Strong tooling for systems work
 
 ---
 
 ## Future Optimizations
 
-### Planned Improvements
-
-1. **Incremental OTA support**
-   * Apply delta patches
-   * Requires base image handling
-
-2. **Graphical User Interface (GUI)**
-   * Enhanced ease of use: Provides an intuitive visual layout that simplifies complex workflows for end-users.
-   * Reduced technical barrier: Enables non-technical users to manage updates and system settings without using command-line tools.
-   
-### Performance Goals
-
-* **NVMe saturation**: 3+ GB/s on high-end drives
-* **Lower memory footprint**: < 50 MB for typical OTAs
-* **Faster hash computation**: Explore hardware SHA extensions
+* Incremental OTA support
+* Optional GUI frontend for visualization and inspection
 
 ---
 
 ## Troubleshooting
 
-### Performance Issues
+### Slow Extraction
 
-**Symptom**: Slower than expected extraction
+Likely causes:
 
-**Possible Causes**:
-1. HDD storage (seek overhead)
-2. Highly compressed OTA (CPU bound)
-3. Excessive thread count (diminishing returns)
-4. Background processes competing for I/O
+* HDD I/O
+* Heavy compression
+* Excessive thread count
 
-**Solutions**:
-* Use SSD for input/output
-* Reduce thread count: `-t 8`
-* Check with `--stats` to identify bottleneck
+### Hash Failures
 
-### Verification Failures
+Likely causes:
 
-**Symptom**: Hash mismatch errors
-
-**Possible Causes**:
-1. Corrupted input OTA file
-2. Disk errors during extraction
-3. RAM corruption (rare)
-
-**Solutions**:
-* Re-download OTA file
-* Run disk diagnostics
-* Use `--strict` mode to catch issues early
+* Corrupted OTA
+* Disk issues
+* Rare hardware faults
 
 ---
 
 ## References
 
-* [Android OTA Format Documentation](https://source.android.com/devices/tech/ota)
-* [Memory-Mapped I/O (mmap)](https://man7.org/linux/man-pages/man2/mmap.2.html)
-* [SIMD Intrinsics Guide](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)
-* [Rust Book](https://doc.rust-lang.org/book/)
+* Android OTA Format — [https://source.android.com/devices/tech/ota](https://source.android.com/devices/tech/ota)
+* `mmap(2)` — [https://man7.org/linux/man-pages/man2/mmap.2.html](https://man7.org/linux/man-pages/man2/mmap.2.html)
+* Intel Intrinsics Guide — [https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html](https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html)
+* The Rust Book — [https://doc.rust-lang.org/book/](https://doc.rust-lang.org/book/)
 
 ---
 
-For user-facing documentation, see [README.md](README.md)
+For user-facing documentation, see **README.md**.
+
+---
+
+
+Just say the word.
