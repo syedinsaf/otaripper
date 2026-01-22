@@ -1,10 +1,10 @@
 [package]
 name = "otaripper"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2024"
 rust-version = "1.93.0"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
-description = "Fast partition extractor for Android OTA zip and payload.bin files"
+description = "Ultra-fast partition extractor for Android OTA .zip and payload.bin files"
 repository = "https://github.com/syedinsaf/otaripper"
 license = "Apache-2.0"
 keywords = ["android", "ota", "cli", "payload", "extractor", "aosp"]
@@ -35,6 +35,7 @@ zip = { version = "7.2.0", default-features = false, features = [
   "bzip2",
   "zstd",
 ] }
+libc = "0.2.180"
 
 # Compatibility: Static liblzma only on musl to avoid glibc x86-64-v4 issues
 [target.'cfg(target_env = "musl")'.dependencies]
@@ -50,5 +51,5 @@ codegen-units = 1
 strip = true
 debug = false
 panic = "abort"
-overflow-checks = false
+overflow-checks = true
 incremental = false
