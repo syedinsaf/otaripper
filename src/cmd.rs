@@ -1,6 +1,8 @@
-use crate::chromeos_update_engine::install_operation::Type;
-use crate::chromeos_update_engine::{DeltaArchiveManifest, InstallOperation, PartitionUpdate};
 use crate::payload::Payload;
+use crate::proto::chromeos_update_engine::install_operation::Type;
+use crate::proto::chromeos_update_engine::{
+    DeltaArchiveManifest, InstallOperation, PartitionUpdate,
+};
 use anyhow::{Context, Result, bail, ensure};
 
 use bzip2::read::BzDecoder;
