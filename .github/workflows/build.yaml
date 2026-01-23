@@ -30,7 +30,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
+      
       - name: Install dependencies
         run: |
           sudo apt-get update
@@ -84,7 +84,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
+      
       - name: Install tools
         run: choco install protoc -y
 
@@ -157,22 +157,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
+      
       - name: Install Protobuf
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Setup Android NDK
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r26d
-        id: ndk
-      - name: Configure Android toolchain
+
+      - name: Build Android
         run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [target.aarch64-linux-android]
-          linker = "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          EOF
-      - name: Build
-        run: cargo build --release --target aarch64-linux-android
+          TOOLCHAIN=$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64
+          
+          export CC_aarch64_linux_android="$TOOLCHAIN/bin/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$TOOLCHAIN/bin/llvm-ar"
+          
+          cargo build --release --target aarch64-linux-android
+
       - name: Package
         run: |
           VERSION_CLEAN="${GITHUB_REF_NAME#v}"
@@ -182,6 +179,7 @@ jobs:
           cp README.md LICENSE pkg/
           zip -j "$ARCHIVE" pkg/*
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+
       - uses: actions/upload-artifact@v4
         with:
           name: android-arm64
@@ -198,6 +196,7 @@ jobs:
     needs: [linux-matrix, windows-matrix, macos-matrix, android-arm64]
     permissions:
       contents: write
+      id-token: write
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
