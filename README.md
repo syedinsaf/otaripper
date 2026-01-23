@@ -126,6 +126,23 @@ Prebuilt binaries are available on the
 * macOS (Intel): `otaripper-x86_64-apple-darwin`
 * macOS (Apple Silicon): `otaripper-aarch64-apple-darwin`
 
+## Arch Linux (AUR)
+
+otaripper is available on the AUR:
+
+```bash
+paru -S otaripper        # build from source (recommended)
+paru -S otaripper-bin    # prebuilt glibc binary
+
+yay -S otaripper
+yay -S otaripper-bin
+```
+
+If `otaripper-bin` fails to run due to libc/runtime issues, use the
+fully static musl build from GitHub Releases:
+
+[https://github.com/syedinsaf/otaripper/releases](https://github.com/syedinsaf/otaripper/releases)
+
 ---
 
 ## Basic Usage
