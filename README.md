@@ -252,7 +252,7 @@ otaripper can be built locally with **CPU-specific optimizations** for maximum p
 This enables all instruction sets supported by your CPU (AVX2 / AVX-512 / ARMv8, etc.).
 
 ⚠️ **Important:**  
-Binaries built this way are **NOT portable** and **must not be redistributed**.
+Binaries built this way are **NOT portable** and **must NOT be redistributed**.
 
 ---
 
