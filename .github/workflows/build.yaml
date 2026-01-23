@@ -20,11 +20,8 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            outname: otaripper-linux-x86_64
           - target: x86_64-unknown-linux-musl
-            outname: otaripper-linux-static-x86_64
           - target: aarch64-unknown-linux-gnu
-            outname: otaripper-linux-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -55,6 +52,9 @@ jobs:
           cat > .cargo/config.toml <<EOF
           [target.aarch64-unknown-linux-gnu]
           linker = "aarch64-linux-gnu-gcc"
+          [env]
+          CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
+          AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
           EOF
 
       - name: Build
@@ -67,18 +67,19 @@ jobs:
           fi
 
       - name: Package
+        shell: bash
         run: |
+          VERSION_CLEAN="${GITHUB_REF_NAME#v}"
+          OUT_NAME="${BIN_NAME}-${VERSION_CLEAN}-${{ matrix.target }}"
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
-          sha256sum ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
-        shell: bash
+          cp README.md LICENSE pkg/
+          tar -czf "${OUT_NAME}.tar.gz" -C pkg .
+          sha256sum "${OUT_NAME}.tar.gz" > "${OUT_NAME}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.outname }}
+          name: linux-${{ matrix.target }}
           path: |
             *.tar.gz
             *.sha256
@@ -93,9 +94,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            outname: otaripper-windows-msvc-x86_64
           - target: x86_64-pc-windows-gnu
-            outname: otaripper-windows-gnu-x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -104,10 +103,11 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install tools
-        run: |
-          choco install protoc -y
-          choco install zip -y
+      - name: Install Protobuf Compiler
+        run: choco install protoc -y
+
+      - name: Install zip
+        run: choco install zip -y
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -115,16 +115,17 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          VERSION_CLEAN="${GITHUB_REF_NAME#v}"
+          OUT_NAME="${BIN_NAME}-${VERSION_CLEAN}-${{ matrix.target }}"
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME}.exe pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          7z a -tzip ${{ matrix.outname }}.zip ./pkg/*
-          sha256sum ${{ matrix.outname }}.zip > ${{ matrix.outname }}.sha256
+          cp README.md LICENSE pkg/
+          7z a -tzip "${OUT_NAME}.zip" ./pkg/*
+          sha256sum "${OUT_NAME}.zip" > "${OUT_NAME}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.outname }}
+          name: windows-${{ matrix.target }}
           path: |
             *.zip
             *.sha256
@@ -138,9 +139,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            outname: otaripper-macos-x86_64
           - target: aarch64-apple-darwin
-            outname: otaripper-macos-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -163,22 +162,23 @@ jobs:
 
       - name: Package
         run: |
+          VERSION_CLEAN="${GITHUB_REF_NAME#v}"
+          OUT_NAME="${BIN_NAME}-${VERSION_CLEAN}-${{ matrix.target }}"
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
-          shasum -a 256 ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
+          cp README.md LICENSE pkg/
+          tar -czf "${OUT_NAME}.tar.gz" -C pkg .
+          shasum -a 256 "${OUT_NAME}.tar.gz" > "${OUT_NAME}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.outname }}
+          name: macos-${{ matrix.target }}
           path: |
             *.tar.gz
             *.sha256
 
 # =========================
-# Android Build 
+# Android Build
 # =========================
   android-arm64:
     runs-on: ubuntu-latest
@@ -200,14 +200,10 @@ jobs:
 
       - name: Configure and Build Android
         run: |
-          # Define NDK toolchain path
           TOOLCHAIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
-          
-          # Use Environment Variables instead of cargo config for more reliable C compilation
           export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
           export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
           export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android24-clang"
-          
           cargo build --release --target aarch64-linux-android
 
       - name: Strip Android binary
@@ -219,16 +215,17 @@ jobs:
 
       - name: Package
         run: |
+          VERSION_CLEAN="${GITHUB_REF_NAME#v}"
+          OUT_NAME="${BIN_NAME}-${VERSION_CLEAN}-aarch64-linux-android"
           mkdir pkg
           cp target/aarch64-linux-android/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          zip -j otaripper-android-arm64.zip pkg/*
-          sha256sum otaripper-android-arm64.zip > otaripper-android-arm64.sha256
+          cp README.md LICENSE pkg/
+          zip -j "${OUT_NAME}.zip" pkg/*
+          sha256sum "${OUT_NAME}.zip" > "${OUT_NAME}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: otaripper-android-arm64
+          name: android-arm64
           path: |
             *.zip
             *.sha256
