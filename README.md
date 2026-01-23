@@ -278,9 +278,12 @@ chmod +x build.sh
 ````
 
 Output binary:
+After running `build.sh`, a new folder named `otaripper-native`
+will be created **in the same directory where `build.sh` is located**.
+
 
 ```text
-~/Documents/otaripper-native/otaripper
+~/otaripper-native/otaripper
 ```
 
 ---
@@ -311,9 +314,11 @@ Then run:
 ```
 
 Output binary:
+After running `build.ps1`, a new folder named `otaripper-native`
+will be created **in the same directory where `build.ps1` is located**.
 
 ```text
-Documents\otaripper-native\otaripper.exe
+otaripper-native\otaripper.exe
 ```
 
 ---
