@@ -245,6 +245,88 @@ Binary output:
 
 ---
 
+
+## Native Optimized Build (Advanced)
+
+otaripper can be built locally with **CPU-specific optimizations** for maximum performance.
+This enables all instruction sets supported by your CPU (AVX2 / AVX-512 / ARMv8, etc.).
+
+⚠️ **Important:**  
+Binaries built this way are **NOT portable** and **must not be redistributed**.
+
+---
+
+### Linux / macOS (build.sh)
+
+A helper script is provided to:
+- download the source
+- optionally install Rust (with confirmation)
+- build a **CPU-native release binary**
+- clean up all intermediate files
+
+#### Requirements
+- `curl`
+- `unzip`
+- A C toolchain (gcc / clang)
+- Rust (installed automatically if missing)
+
+#### Usage
+
+```bash
+chmod +x build.sh
+./build.sh
+````
+
+Output binary:
+
+```text
+~/Documents/otaripper-native/otaripper
+```
+
+---
+
+### Windows (PowerShell – MSVC)
+
+On Windows, a native PowerShell script is provided.
+It uses the official **Windows rustup installer** and defaults to the **MSVC toolchain**.
+
+#### Requirements
+
+* Windows 10 / 11
+* PowerShell 5.1 or newer
+* Visual Studio Build Tools (prompted automatically if missing)
+
+#### Usage
+
+Before running the script, allow execution **for the current session only**:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+Then run:
+
+```powershell
+.\build.ps1
+```
+
+Output binary:
+
+```text
+Documents\otaripper-native\otaripper.exe
+```
+
+---
+
+### Notes
+
+* Native builds use `-C target-cpu=native`
+* Performance may be significantly higher than portable binaries
+* These builds are intended for **local use only**
+* GitHub Releases remain the recommended option for most users
+
+---
+
 ## Contributing
 
 Testing, bug reports, and performance feedback are welcome.
