@@ -41,8 +41,6 @@ libc = "0.2.180"
 [target.'cfg(target_env = "musl")'.dependencies]
 xz2 = { version = "0.1.7", features = ["static"] }
 
-[build-dependencies]
-prost-build = "0.14.3"
 
 [profile.release]
 opt-level = 3
