@@ -1,5 +1,6 @@
 name: Build & Release otaripper
 run-name: "otaripper ${{ github.ref_name }} - release build"
+
 on:
   push:
     tags:
@@ -8,6 +9,7 @@ on:
 
 env:
   BIN_NAME: otaripper
+  VERSION: ${{ github.ref_name }}
 
 jobs:
 
@@ -21,70 +23,52 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            outname: otaripper-linux-x86_64
           - target: x86_64-unknown-linux-musl
-            outname: otaripper-linux-static-x86_64
           - target: aarch64-unknown-linux-gnu
-            outname: otaripper-linux-arm64
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Protobuf Compiler
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
-      - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get install -y musl-tools
-
-      - name: Install ARM64 cross toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get install -y gcc-aarch64-linux-gnu
-
-      - name: Configure ARM64 toolchain
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+      - name: Install dependencies
         run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml <<EOF
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-
-          [env]
-          CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
-          AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
-          EOF
-
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            sudo apt-get install -y musl-tools
+          fi
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+            mkdir -p .cargo
+            cat > .cargo/config.toml <<EOF
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+EOF
+          fi
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary
-        run: |
-          if [ -f "target/${{ matrix.target }}/release/${BIN_NAME}" ]; then
-            strip target/${{ matrix.target }}/release/${BIN_NAME} || true
-          fi
-
       - name: Package
+        shell: bash
         run: |
+          VERSION_CLEAN="${VERSION#v}"
+          ARCHIVE="${BIN_NAME}-${VERSION_CLEAN}-${{ matrix.target }}.tar.gz"
+
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
-          sha256sum ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
-        shell: bash
+          cp README.md LICENSE pkg/
+
+          tar -czf "$ARCHIVE" -C pkg .
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.outname }}
+          name: linux-${{ matrix.target }}
           path: |
             *.tar.gz
             *.sha256
@@ -100,26 +84,19 @@ jobs:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            outname: otaripper-windows-msvc-x86_64
           - target: x86_64-pc-windows-gnu
-            outname: otaripper-windows-gnu-x86_64
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Protobuf Compiler
-        run: choco install protoc -y
-
-      - name: Install zip
-        run: choco install zip -y
+      - name: Install tools
+        run: |
+          choco install protoc zip -y
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -127,16 +104,19 @@ jobs:
       - name: Package
         shell: bash
         run: |
+          VERSION_CLEAN="${VERSION#v}"
+          ARCHIVE="${BIN_NAME}-${VERSION_CLEAN}-${{ matrix.target }}.zip"
+
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME}.exe pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          zip -r ${{ matrix.outname }}.zip pkg
-          sha256sum ${{ matrix.outname }}.zip > ${{ matrix.outname }}.sha256
+          cp README.md LICENSE pkg/
+
+          zip -r "$ARCHIVE" pkg
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.outname }}
+          name: windows-${{ matrix.target }}
           path: |
             *.zip
             *.sha256
@@ -151,44 +131,37 @@ jobs:
       matrix:
         include:
           - target: x86_64-apple-darwin
-            outname: otaripper-macos-x86_64
           - target: aarch64-apple-darwin
-            outname: otaripper-macos-arm64
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Protobuf Compiler
+      - name: Install Protobuf
         run: brew install protobuf
 
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Strip binary
-        run: |
-          if [ -f "target/${{ matrix.target }}/release/${BIN_NAME}" ]; then
-            strip target/${{ matrix.target }}/release/${BIN_NAME} || true
-          fi
-
       - name: Package
         run: |
+          VERSION_CLEAN="${VERSION#v}"
+          ARCHIVE="${BIN_NAME}-${VERSION_CLEAN}-${{ matrix.target }}.tar.gz"
+
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
-          shasum -a 256 ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
+          cp README.md LICENSE pkg/
+
+          tar -czf "$ARCHIVE" -C pkg .
+          shasum -a 256 "$ARCHIVE" > "$ARCHIVE.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.outname }}
+          name: macos-${{ matrix.target }}
           path: |
             *.tar.gz
             *.sha256
@@ -202,16 +175,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android
 
-      - name: Install Protobuf Compiler
+      - name: Install Protobuf
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Setup Android NDK
@@ -224,36 +194,28 @@ jobs:
         run: |
           mkdir -p .cargo
           cat > .cargo/config.toml <<EOF
-          [target.aarch64-linux-android]
-          linker = "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-
-          [env]
-          CC_aarch64_linux_android="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          AR_aarch64_linux_android="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
-          EOF
+[target.aarch64-linux-android]
+linker = "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+EOF
 
       - name: Build
         run: cargo build --release --target aarch64-linux-android
 
-      - name: Strip Android binary
-        run: |
-          llvmstrip="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          if [ -f "target/aarch64-linux-android/release/${BIN_NAME}" ]; then
-            "$llvmstrip" target/aarch64-linux-android/release/${BIN_NAME} || true
-          fi
-
       - name: Package
         run: |
+          VERSION_CLEAN="${VERSION#v}"
+          ARCHIVE="${BIN_NAME}-${VERSION_CLEAN}-aarch64-linux-android.zip"
+
           mkdir pkg
           cp target/aarch64-linux-android/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
-          zip otaripper-android-arm64.zip pkg/*
-          sha256sum otaripper-android-arm64.zip > otaripper-android-arm64.sha256
+          cp README.md LICENSE pkg/
+
+          zip "$ARCHIVE" pkg/*
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: otaripper-android-arm64
+          name: android-arm64
           path: |
             *.zip
             *.sha256
@@ -279,4 +241,5 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: "otaripper ${{ github.ref_name }}"
+          generate_release_notes: true
           files: artifacts/**/*
