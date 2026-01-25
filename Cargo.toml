@@ -27,7 +27,7 @@ mimalloc = { version = "0.1.48", features = ["v3"] }
 prost = "0.14.3"
 rayon = "1.11.0"
 ring = "0.17.14"
-sysinfo = "0.37.2"
+sysinfo = "0.38.0"
 tempfile = "3.24.0"
 xz2 = "0.1.7"
 zip = { version = "7.2.0", default-features = false, features = [
