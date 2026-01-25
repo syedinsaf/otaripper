@@ -11,7 +11,7 @@ use clap::{Parser, ValueHint};
 use console::Style;
 use crossbeam_channel::unbounded;
 use ctrlc;
-use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressFinish, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 use memmap2::{Mmap, MmapMut};
 use prost::Message;
 use rayon::{ThreadPool, ThreadPoolBuilder};
@@ -35,10 +35,6 @@ use zip::ZipArchive;
 // ===== Copy & SIMD tuning =====
 const OPTIMAL_CHUNK_SIZE: usize = 256 * 1024;
 const SIMD_THRESHOLD: usize = 4096;
-
-// ===== Progress rendering =====
-const PROGRESS_UPDATE_FREQUENCY_HIGH: u8 = 2;
-const PROGRESS_UPDATE_FREQUENCY_LOW: u8 = 1;
 
 // ===== Android OTA limits =====
 const MIN_BLOCK_SIZE: usize = 512;
@@ -565,7 +561,6 @@ unsafe fn is_all_zero_avx512(data: &[u8]) -> bool {
             let chunk = _mm512_loadu_si512(ptr.add(i) as *const __m512i);
 
             if _mm512_test_epi8_mask(chunk, chunk) != 0 {
-                // ← Correct
                 return false;
             }
         }
@@ -1041,16 +1036,7 @@ impl Cmd {
         );
         eprintln!();
         threadpool.scope(|scope| -> Result<()> {
-            let multiprogress = {
-                // Setting a fixed update frequency reduces flickering.
-                let hz = if selected_count > 32 {
-                    PROGRESS_UPDATE_FREQUENCY_LOW
-                } else {
-                    PROGRESS_UPDATE_FREQUENCY_HIGH
-                };
-                let draw_target = ProgressDrawTarget::stderr_with_hz(hz);
-                MultiProgress::with_draw_target(draw_target)
-            };
+            let multiprogress = MultiProgress::new();
 
             // Maintain the manifest/extraction order for neatly printing hashes later
             for (hash_index_counter, update) in manifest
@@ -1091,7 +1077,7 @@ impl Cmd {
                     .and_then(|i| i.size)
                     .unwrap_or(0) as u64;
 
-                let zero_heavy = total_bytes > 0 && zero_bytes * 100 / total_bytes >= 80;
+                let zero_heavy = total_bytes > 0 && zero_bytes * 100 / total_bytes >= 50;
 
                 let progress_bar = self.create_progress_bar(update)?;
                 let progress_bar = multiprogress.add(progress_bar);
@@ -1185,6 +1171,8 @@ impl Cmd {
                         let simd = simd;
 
                         scope.spawn(move |_| {
+                            let mut chunk_bytes_processed = 0usize; // Buffer for this thread's chunk
+
                             for op in chunk {
                                 if ctx.cancellation_token.load(Ordering::Acquire) {
                                     return;
@@ -1203,7 +1191,7 @@ impl Cmd {
 
                                 match result {
                                     Ok(bytes) => {
-                                        progress_bar.inc(bytes as u64);
+                                        chunk_bytes_processed += bytes;
                                     }
                                     Err(e) => {
                                         ctx.cancellation_token.store(true, Ordering::Release);
@@ -1219,7 +1207,12 @@ impl Cmd {
                                 }
                             }
 
-                            if ctx.remaining_ops.fetch_sub(chunk.len(), Ordering::AcqRel)
+                            // Batch update: Call inc() once per chunk instead of once per operation
+                            if chunk_bytes_processed > 0 {
+                                progress_bar.inc(chunk_bytes_processed as u64);
+                            }
+
+                            if ctx.remaining_ops.fetch_sub(chunk.len(), Ordering::Release)
                                 == chunk.len()
                             {
                                 self.post_process_partition(
