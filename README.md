@@ -56,7 +56,7 @@ The tool is written in Rust and prioritizes:
 
 Unlike many extraction tools, otaripper **verifies output images by default** and refuses to leave behind partially valid or corrupted files.
 
-Incremental OTA packages are intentionally **not supported**.
+⚠️ Incremental OTA packages are intentionally **not supported**.
 
 ---
 
