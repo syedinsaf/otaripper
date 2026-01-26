@@ -2,11 +2,6 @@ name: Manual Build (Artifacts Only)
 
 on:
   workflow_dispatch:
-    inputs:
-      reason:
-        description: "Why are you running this build?"
-        required: false
-        default: "Manual build"
 
 permissions:
   contents: read
@@ -34,14 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build reason
-        run: |
-          echo "=============================="
-          echo "Manual build invoked"
-          echo -e "\033[1;34mReason:\033[0m"
-          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
-          echo "=============================="
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -49,13 +36,17 @@ jobs:
 
       - name: Install musl tools
         if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       - name: Install ARM64 cross toolchain
         if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      - name: Configure ARM64 toolchain
+      - name: Configure Cargo (ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           mkdir -p .cargo
@@ -73,17 +64,14 @@ jobs:
 
       - name: Strip binary
         run: |
-          if [ -f "target/${{ matrix.target }}/release/${BIN_NAME}" ]; then
-            strip target/${{ matrix.target }}/release/${BIN_NAME} || true
-          fi
+          strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
       - name: Package
         shell: bash
         run: |
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
+          cp README.md LICENSE pkg/
           tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
           sha256sum ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
 
@@ -111,15 +99,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build reason
-        shell: bash
-        run: |
-          echo "=============================="
-          echo "Manual build invoked"
-          echo -e "\033[1;34mReason:\033[0m"
-          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
-          echo "=============================="
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -136,8 +115,7 @@ jobs:
         run: |
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME}.exe pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
+          cp README.md LICENSE pkg/
           zip -r ${{ matrix.outname }}.zip pkg
           sha256sum ${{ matrix.outname }}.zip > ${{ matrix.outname }}.sha256
 
@@ -164,14 +142,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build reason
-        run: |
-          echo "=============================="
-          echo "Manual build invoked"
-          echo -e "\033[1;34mReason:\033[0m"
-          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
-          echo "=============================="
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -182,16 +152,13 @@ jobs:
 
       - name: Strip binary
         run: |
-          if [ -f "target/${{ matrix.target }}/release/${BIN_NAME}" ]; then
-            strip target/${{ matrix.target }}/release/${BIN_NAME} || true
-          fi
+          strip target/${{ matrix.target }}/release/${BIN_NAME} || true
 
       - name: Package
         run: |
           mkdir pkg
           cp target/${{ matrix.target }}/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
+          cp README.md LICENSE pkg/
           tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
           shasum -a 256 ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
 
@@ -203,21 +170,13 @@ jobs:
             *.sha256
 
 # =========================
-# Android Build
+# Android (ARM64)
 # =========================
   android-arm64:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Build reason
-        run: |
-          echo "=============================="
-          echo "Manual build invoked"
-          echo -e "\033[1;34mReason:\033[0m"
-          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
-          echo "=============================="
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -230,7 +189,7 @@ jobs:
           ndk-version: r26d
         id: ndk
 
-      - name: Configure Android toolchain
+      - name: Configure Cargo (Android)
         run: |
           mkdir -p .cargo
           cat > .cargo/config.toml <<EOF
@@ -245,19 +204,16 @@ jobs:
       - name: Build
         run: cargo build --release --target aarch64-linux-android
 
-      - name: Strip Android binary
+      - name: Strip binary
         run: |
-          llvmstrip="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
-          if [ -f "target/aarch64-linux-android/release/${BIN_NAME}" ]; then
-            "$llvmstrip" target/aarch64-linux-android/release/${BIN_NAME} || true
-          fi
+          "${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+            target/aarch64-linux-android/release/${BIN_NAME} || true
 
       - name: Package
         run: |
           mkdir pkg
           cp target/aarch64-linux-android/release/${BIN_NAME} pkg/
-          cp README.md pkg/
-          cp LICENSE pkg/
+          cp README.md LICENSE pkg/
           zip -j otaripper-android-arm64.zip pkg/*
           sha256sum otaripper-android-arm64.zip > otaripper-android-arm64.sha256
 
