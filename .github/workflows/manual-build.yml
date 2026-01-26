@@ -113,6 +113,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build reason
+        shell: bash
         run: |
           echo "=============================="
           echo "Manual build invoked"
