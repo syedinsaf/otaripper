@@ -9,9 +9,11 @@
 
 Extract partitions from Android OTA files with cryptographic verification, strong reliability guarantees, and high-performance execution.
 
+[![Crates.io](https://img.shields.io/crates/v/otaripper?style=for-the-badge)](https://crates.io/crates/otaripper)
 [![GitHub release](https://img.shields.io/github/v/release/syedinsaf/otaripper?style=for-the-badge)](https://github.com/syedinsaf/otaripper/releases)
 [![Downloads](https://img.shields.io/github/downloads/syedinsaf/otaripper/total?style=for-the-badge)](https://github.com/syedinsaf/otaripper/releases)
 [![License](https://img.shields.io/github/license/syedinsaf/otaripper?style=for-the-badge)](LICENSE)
+
 
 [Download](https://github.com/syedinsaf/otaripper/releases) •
 [Quick Start](#quick-start) •
@@ -251,7 +253,7 @@ Binary output:
 otaripper can be built locally with **CPU-specific optimizations** for maximum performance.
 This enables all instruction sets supported by your CPU (AVX2 / AVX-512 / ARMv8, etc.).
 
-⚠️ **Important:**  
+⚠️ **Important:**
 Binaries built this way are **NOT portable** and **must NOT be redistributed**.
 
 ---
