@@ -33,6 +33,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Build reason
+        run: |
+          echo "=============================="
+          echo "Manual build invoked"
+          echo -e "\033[1;34mReason:\033[0m"
+          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
+          echo "=============================="
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -105,6 +112,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Build reason
+        run: |
+          echo "=============================="
+          echo "Manual build invoked"
+          echo -e "\033[1;34mReason:\033[0m"
+          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
+          echo "=============================="
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -152,6 +166,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Build reason
+        run: |
+          echo "=============================="
+          echo "Manual build invoked"
+          echo -e "\033[1;34mReason:\033[0m"
+          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
+          echo "=============================="
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -194,6 +215,13 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Build reason
+        run: |
+          echo "=============================="
+          echo "Manual build invoked"
+          echo -e "\033[1;34mReason:\033[0m"
+          echo "${{ github.event.inputs.reason || 'Manual run (no reason provided)' }}"
+          echo "=============================="
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
