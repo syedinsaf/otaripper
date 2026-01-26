@@ -10,7 +10,7 @@
 Extract partitions from Android OTA files with cryptographic verification, strong reliability guarantees, and high-performance execution.
 
 [![Crates.io](https://img.shields.io/crates/v/otaripper?style=for-the-badge&logo=rust&logoColor=white&label=crates.io&color=rust)](https://crates.io/crates/otaripper)
-[![GitHub release](https://img.shields.io/github/v/release/syedinsaf/otaripper?style=for-the-badge&logo=github&logoColor=white&color=rust)](https://github.com/syedinsaf/otaripper releases)
+[![GitHub release](https://img.shields.io/github/v/release/syedinsaf/otaripper?style=for-the-badge&logo=github&logoColor=white&color=rust)](https://github.com/syedinsaf/otaripper/releases)
 [![Downloads](https://img.shields.io/github/downloads/syedinsaf/otaripper/total?style=for-the-badge&logo=github&logoColor=white&color=rust)](https://github.com/syedinsaf/otaripper/releases)
 [![License](https://img.shields.io/github/license/syedinsaf/otaripper?style=for-the-badge&logo=github&logoColor=white&color=rust)](LICENSE)
 
