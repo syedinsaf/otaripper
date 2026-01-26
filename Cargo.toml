@@ -7,7 +7,7 @@ authors = ["Syed Insaf <syedinsaf@proton.me>"]
 description = "Ultra-fast partition extractor for Android OTA .zip and payload.bin files"
 repository = "https://github.com/syedinsaf/otaripper"
 license = "Apache-2.0"
-keywords = ["android", "ota", "cli", "payload", "extractor", "aosp"]
+keywords = ["android", "ota", "cli", "payload", "aosp"]
 categories = ["command-line-utilities"]
 readme = "README.md"
 
