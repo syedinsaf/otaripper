@@ -28,17 +28,24 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{env, slice};
+use std::cell::RefCell;
 use sysinfo::{MemoryRefreshKind, RefreshKind};
 use tempfile::NamedTempFile;
 use zip::ZipArchive;
 
-// ===== Copy & SIMD tuning =====
-const OPTIMAL_CHUNK_SIZE: usize = 256 * 1024;
+
 const SIMD_THRESHOLD: usize = 4096;
 
 // ===== Android OTA limits =====
 const MIN_BLOCK_SIZE: usize = 512;
 const MAX_BLOCK_SIZE: usize = 16 * 1024 * 1024;
+
+// ===== Thread-local Buffers =====
+thread_local! {
+    /// 1MB buffer utilized by `run_op_replace` to amortize Rayon allocation costs
+    /// and to ensure SIMD streaming (non-temporal writes) can trigger for decompressed payloads.
+    static COPY_BUFFER: RefCell<Vec<u8>> = RefCell::new(vec![0; 1024 * 1024]);
+}
 
 #[derive(Debug, clap::Subcommand)]
 pub enum SubCmd {
@@ -341,23 +348,7 @@ impl CpuSimd {
 #[inline]
 fn simd_copy_large(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
     debug_assert_eq!(src.len(), dst.len());
-
-    if src.len() > OPTIMAL_CHUNK_SIZE * 4 {
-        let mut offset = 0;
-
-        while offset < src.len() {
-            let chunk_size = std::cmp::min(OPTIMAL_CHUNK_SIZE, src.len() - offset);
-
-            let src_chunk = &src[offset..offset + chunk_size];
-            let dst_chunk = &mut dst[offset..offset + chunk_size];
-
-            simd_copy_chunk(simd, src_chunk, dst_chunk);
-
-            offset += chunk_size;
-        }
-    } else {
-        simd_copy_chunk(simd, src, dst);
-    }
+    simd_copy_chunk(simd, src, dst);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1066,7 +1057,7 @@ impl Cmd {
                     })
                     .flat_map(|op| &op.dst_extents)
                     .map(|e| {
-                        let blocks = e.num_blocks.unwrap_or(0) as u64;
+                        let blocks = e.num_blocks.unwrap_or(0);
                         blocks * block_size as u64
                     })
                     .sum();
@@ -1075,7 +1066,7 @@ impl Cmd {
                     .new_partition_info
                     .as_ref()
                     .and_then(|i| i.size)
-                    .unwrap_or(0) as u64;
+                    .unwrap_or(0);
 
                 let zero_heavy = total_bytes > 0 && zero_bytes * 100 / total_bytes >= 50;
 
@@ -1327,7 +1318,7 @@ impl Cmd {
             .new_partition_info
             .as_ref()
             .and_then(|i| i.size)
-            .unwrap_or(0) as u64;
+            .unwrap_or(0);
 
         let style = ProgressStyle::with_template(
             "{prefix:>24!.green.bold} [{wide_bar:.white.dim}] {percent:>3}%",
@@ -1521,9 +1512,53 @@ impl Cmd {
         simd: CpuSimd,
     ) -> Result<()> {
         let dst_len = dst_extents.iter().map(|e| e.len()).sum::<usize>();
-        let bytes_read = io::copy(reader, &mut ExtentsWriter::new(dst_extents, simd))
-            .context("failed to write to buffer")? as usize;
-        let bytes_read_aligned = (bytes_read + block_size - 1) / block_size * block_size;
+
+        // FAST PATH: Single extent zero-copy decompressive read directly into memory-mapped file
+        if dst_extents.len() == 1 {
+            let dst = &mut dst_extents[0];
+            let mut total_read = 0;
+            loop {
+                match reader.read(&mut dst[total_read..]) {
+                    Ok(0) => break,
+                    Ok(n) => total_read += n,
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e).context("failed to read decompressed data directly to extent"),
+                }
+            }
+            let bytes_read_aligned = total_read.div_ceil(block_size) * block_size;
+            ensure!(
+                bytes_read_aligned == dst_len,
+                "more dst blocks than data, even with padding"
+            );
+            
+            // Force the decoder to hit EOF to trigger trailing CRC/checksum logic, properly bubbling up any I/O errors 
+            let mut eof_check = [0u8; 1];
+            let extra_bytes = reader.read(&mut eof_check).context("failed to check EOF")?;
+            ensure!(extra_bytes == 0, "stream contained more data than extent capacity");
+            return Ok(());
+        }
+
+        // BUFFERED PATH: Multi-extent using thread local 1MB buffer for optimal SIMD triggers
+        let mut total_read = 0usize;
+        let mut writer = ExtentsWriter::new(dst_extents, simd);
+
+        COPY_BUFFER.with(|buf_cell| {
+            let mut buf = buf_cell.borrow_mut();
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        writer.write_all(&buf[..n]).context("failed to write to ExtentsWriter")?;
+                        total_read += n;
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e).context("failed to read from decompressor"),
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
+
+        let bytes_read_aligned = total_read.div_ceil(block_size) * block_size;
         ensure!(
             bytes_read_aligned == dst_len,
             "more dst blocks than data, even with padding"
@@ -1541,7 +1576,7 @@ impl Cmd {
     ) -> Result<()> {
         let bytes_read = data.len();
 
-        let bytes_read_aligned = (bytes_read + block_size - 1) / block_size * block_size;
+        let bytes_read_aligned = bytes_read.div_ceil(block_size) * block_size;
 
         ensure!(
             bytes_read_aligned == total_dst_size,
