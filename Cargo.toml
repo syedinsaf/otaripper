@@ -1,6 +1,6 @@
 [package]
 name = "otaripper"
-version = "2.1.1"
+version = "2.2.0"
 edition = "2024"
 rust-version = "1.93.0"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
@@ -28,14 +28,14 @@ prost = "0.14.3"
 rayon = "1.11.0"
 ring = "0.17.14"
 sysinfo = "0.38.4"
-tempfile = "3.25.0"
+tempfile = "3.27.0"
 xz2 = "0.1.7"
-zip = { version = "8.5.0", default-features = false, features = [
+zip = { version = "8.5.1", default-features = false, features = [
   "deflate",
   "bzip2",
   "zstd",
 ] }
-libc = "0.2.180"
+libc = "0.2.184"
 
 # Compatibility: Static liblzma only on musl to avoid glibc x86-64-v4 issues
 [target.'cfg(target_env = "musl")'.dependencies]

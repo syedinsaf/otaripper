@@ -5,9 +5,10 @@ use crate::proto::chromeos_update_engine::{
 };
 use anyhow::{Context, Result, bail, ensure};
 
+use crate::cmd::SubCmd;
 use bzip2::read::BzDecoder;
 use chrono::Local;
-use clap::{Parser, ValueHint};
+
 use console::Style;
 use crossbeam_channel::unbounded;
 use ctrlc;
@@ -16,8 +17,7 @@ use memmap2::{Mmap, MmapMut};
 use prost::Message;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use ring::digest::{SHA256, digest};
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, Write};
@@ -28,13 +28,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{env, slice};
-use std::cell::RefCell;
 use sysinfo::{MemoryRefreshKind, RefreshKind};
 use tempfile::NamedTempFile;
 use zip::ZipArchive;
 
-
-const SIMD_THRESHOLD: usize = 4096;
+use super::simd::*;
 
 // ===== Android OTA limits =====
 const MIN_BLOCK_SIZE: usize = 512;
@@ -45,102 +43,6 @@ thread_local! {
     /// 1MB buffer utilized by `run_op_replace` to amortize Rayon allocation costs
     /// and to ensure SIMD streaming (non-temporal writes) can trigger for decompressed payloads.
     static COPY_BUFFER: RefCell<Vec<u8>> = RefCell::new(vec![0; 1024 * 1024]);
-}
-
-#[derive(Debug, clap::Subcommand)]
-pub enum SubCmd {
-    /// Remove extracted_* folders
-    #[clap(aliases = &["c"])]
-    Clean {
-        /// Clean extracted_* folders inside this directory
-        #[clap(
-            short = 'o',
-            long = "output-dir",
-            value_name = "PATH",
-            value_hint = clap::ValueHint::DirPath
-        )]
-        output_dir: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Parser)]
-#[clap(
-    about,
-    author,
-    help_template = FRIENDLY_HELP,
-    propagate_version = true,
-    version = env!("CARGO_PKG_VERSION"),
-)]
-pub struct Cmd {
-    #[clap(subcommand)]
-    subcmd: Option<SubCmd>,
-    /// List partitions instead of extracting them
-    #[clap(
-        conflicts_with = "threads",
-        conflicts_with = "output_dir",
-        conflicts_with = "partitions",
-        conflicts_with = "no_verify",
-        long,
-        short
-    )]
-    list: bool,
-
-    /// Number of threads to use during extraction
-    #[clap(long, short, value_name = "NUMBER")]
-    threads: Option<usize>,
-
-    /// Set output directory
-    #[clap(long, short, value_hint = ValueHint::DirPath, value_name = "PATH")]
-    output_dir: Option<PathBuf>,
-
-    /// Dump only selected partitions (comma-separated)
-    #[clap(short = 'p', long, value_delimiter = ',', value_name = "PARTITIONS")]
-    partitions: Vec<String>,
-
-    /// Skip file verification (dangerous!)
-    #[clap(long, conflicts_with = "strict")]
-    no_verify: bool,
-
-    /// Require cryptographic hashes and enforce verification; fails if any required hash is missing
-    #[clap(
-        long,
-        help = "Require manifest hashes for partitions and operations; enforce verification and fail if any required hash is missing."
-    )]
-    strict: bool,
-
-    /// Compute and print SHA-256 of each extracted partition image
-    #[clap(
-        long,
-        help = "Compute and print the SHA-256 of each extracted partition image. If the manifest lacks a hash, this may add one linear pass over the image."
-    )]
-    print_hash: bool,
-
-    /// Run lightweight sanity checks on output images (e.g., detect all-zero images)
-    #[clap(
-        long,
-        help = "Run quick sanity checks on output images and fail on obviously invalid content (e.g., all zeros)."
-    )]
-    sanity: bool,
-
-    /// Print per-partition and total timing/throughput statistics after extraction
-    #[clap(
-        long,
-        help = "Print per-partition and total timing/throughput statistics after extraction."
-    )]
-    stats: bool,
-
-    /// Don't automatically open the extracted folder after completion
-    #[clap(
-        long,
-        short = 'n',
-        help = "Don't automatically open the extracted folder after completion."
-    )]
-    no_open: bool,
-
-    /// Positional argument for the payload file
-    #[clap(value_hint = ValueHint::FilePath)]
-    #[clap(index = 1, value_name = "PATH")]
-    positional_payload: Option<PathBuf>,
 }
 
 pub enum PayloadSource {
@@ -199,414 +101,11 @@ impl Deref for PayloadSource {
     }
 }
 
-/// Writes sequential data across multiple extents with SIMD acceleration.
-pub struct ExtentsWriter<'a, 'b> {
-    extents: &'a mut [&'b mut [u8]],
-    idx: usize,
-    off: usize,
-    simd: CpuSimd,
-}
-impl<'a, 'b> ExtentsWriter<'a, 'b> {
-    /// Create a new ExtentsWriter for writing to the given extents.
-    pub(crate) fn new(extents: &'a mut [&'b mut [u8]], simd: CpuSimd) -> Self {
-        Self {
-            extents,
-            idx: 0,
-            off: 0,
-            simd,
-        }
-    }
-
-    #[inline]
-    fn current_extent_capacity(&self) -> usize {
-        if self.idx < self.extents.len() {
-            self.extents[self.idx].len().saturating_sub(self.off)
-        } else {
-            0
-        }
-    }
-
-    /// Write data using optimized copying strategies with SIMD acceleration
-    #[inline(always)]
-    fn write_to_current_extent(&mut self, data: &[u8]) -> usize {
-        let available = self.current_extent_capacity();
-        if available == 0 || data.is_empty() {
-            return 0;
-        }
-        let to_copy = available.min(data.len());
-
-        // Bounds are guaranteed: current_extent_capacity() returned non-zero,
-        // which ensures self.idx is valid and to_copy fits within the extent
-        let extent = &mut self.extents[self.idx];
-        let dest_slice = &mut extent[self.off..self.off + to_copy];
-        let src_slice = &data[..to_copy];
-
-        // Hot path first: large copies (>= 1KB) use SIMD — this is the common case
-        if to_copy >= SIMD_THRESHOLD {
-            simd_copy_large(self.simd, src_slice, dest_slice);
-        } else {
-            dest_slice.copy_from_slice(src_slice);
-        }
-
-        self.off += to_copy;
-        if self.off >= extent.len() {
-            self.idx += 1;
-            self.off = 0;
-        }
-        to_copy
-    }
+pub(super) struct Extractor<'a> {
+    pub cmd: &'a super::Cmd,
 }
 
-impl<'a, 'b> io::Write for ExtentsWriter<'a, 'b> {
-    fn write(&mut self, mut buf: &[u8]) -> io::Result<usize> {
-        let mut total_written = 0;
-
-        while !buf.is_empty() {
-            let written = self.write_to_current_extent(buf);
-            if written == 0 {
-                break; // no more capacity
-            }
-
-            total_written += written;
-            buf = &buf[written..];
-        }
-
-        Ok(total_written)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-// Runtime CPU feature detection for SIMD acceleration.
-// Cached via OnceLock; enable debug output with OTARIPPER_DEBUG_CPU=1.
-#[cfg(target_arch = "x86_64")]
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum CpuSimd {
-    None,
-    Sse2,
-    Avx2,
-    Avx512,
-}
-
-#[cfg(target_arch = "x86_64")]
-impl CpuSimd {
-    fn detect() -> Self {
-        let avx512f = is_x86_feature_detected!("avx512f");
-        let avx512bw = is_x86_feature_detected!("avx512bw");
-        let avx2 = is_x86_feature_detected!("avx2");
-        let sse2 = is_x86_feature_detected!("sse2");
-
-        let selected = if avx512f && avx512bw {
-            CpuSimd::Avx512
-        } else if avx2 {
-            CpuSimd::Avx2
-        } else if sse2 {
-            CpuSimd::Sse2
-        } else {
-            CpuSimd::None
-        };
-
-        if std::env::var("OTARIPPER_DEBUG_CPU").is_ok() {
-            eprintln!("CPU Feature Detection:");
-            eprintln!("  AVX512F: {}", avx512f);
-            eprintln!("  AVX512BW: {}", avx512bw);
-            eprintln!("  AVX2: {}", avx2);
-            eprintln!("  SSE2: {}", sse2);
-            eprintln!("  Selected: {:?}", selected);
-        }
-
-        selected
-    }
-
-    fn get() -> Self {
-        use std::sync::OnceLock;
-        static DETECTED: OnceLock<CpuSimd> = OnceLock::new();
-        *DETECTED.get_or_init(CpuSimd::detect)
-    }
-}
-
-// For non-x86_64 targets, we use a simple fallback enum
-#[cfg(not(target_arch = "x86_64"))]
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum CpuSimd {
-    None,
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-impl CpuSimd {
-    fn get() -> Self {
-        if std::env::var("OTARIPPER_DEBUG_CPU").is_ok() {
-            eprintln!("CPU Feature Detection: ARM64/Other architecture - using scalar operations");
-        }
-        CpuSimd::None
-    }
-}
-
-/// SIMD-optimized large data copying
-#[inline]
-fn simd_copy_large(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
-    debug_assert_eq!(src.len(), dst.len());
-    simd_copy_chunk(simd, src, dst);
-}
-
-#[cfg(target_arch = "x86_64")]
-#[inline(always)]
-fn simd_copy_chunk(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
-    match simd {
-        CpuSimd::Avx512 => unsafe {
-            if src.len() >= 1_048_576 {
-                simd_copy_avx512_stream(src, dst);
-            } else {
-                simd_copy_avx512(src, dst);
-            }
-        },
-        CpuSimd::Avx2 => unsafe {
-            if src.len() >= 1_048_576 {
-                simd_copy_avx2_stream(src, dst);
-            } else {
-                simd_copy_avx2(src, dst);
-            }
-        },
-        CpuSimd::Sse2 => unsafe { simd_copy_sse2(src, dst) },
-        CpuSimd::None => dst.copy_from_slice(src),
-    }
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-#[inline(always)]
-fn simd_copy_chunk(_simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
-    dst.copy_from_slice(src);
-}
-
-/// Zero-check with SIMD already selected (hot path)
-#[inline(always)]
-fn is_all_zero_with_simd(simd: CpuSimd, data: &[u8]) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        match simd {
-            CpuSimd::Avx512 => unsafe { is_all_zero_avx512(data) },
-            CpuSimd::Avx2 => unsafe { is_all_zero_avx2(data) },
-            CpuSimd::Sse2 => unsafe { is_all_zero_sse2(data) },
-            CpuSimd::None => data.iter().all(|&b| b == 0),
-        }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        // Non-x86 always scalar (auto-vectorized by LLVM)
-        let _ = simd;
-        data.iter().all(|&b| b == 0)
-    }
-}
-
-// === SIMD Copy Implementations ===
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f", enable = "avx512bw")]
-#[inline]
-unsafe fn simd_copy_avx512(src: &[u8], dst: &mut [u8]) {
-    let len = src.len();
-    let src_ptr = src.as_ptr();
-    let dst_ptr = dst.as_mut_ptr();
-    let mut i = 0;
-    let simd_end = len.saturating_sub(63);
-
-    while i < simd_end {
-        unsafe {
-            let data = _mm512_loadu_si512(src_ptr.add(i) as *const __m512i);
-            _mm512_storeu_si512(dst_ptr.add(i) as *mut __m512i, data);
-        }
-        i += 64;
-    }
-
-    if i < len {
-        let remaining_src = &src[i..];
-        let remaining_dst = &mut dst[i..];
-        remaining_dst.copy_from_slice(remaining_src);
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f")]
-unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
-    if src.len() < 1_048_576 {
-        unsafe {
-            return simd_copy_avx512(src, dst);
-        }
-    }
-
-    let src_ptr = src.as_ptr();
-    let dst_ptr = dst.as_mut_ptr();
-    let mut i = 0;
-
-    // Work in 64-byte blocks
-    let simd_end = src.len() & !63;
-    while i < simd_end {
-        unsafe {
-            let data = _mm512_loadu_si512(src_ptr.add(i) as *const __m512i);
-            _mm512_stream_si512(dst_ptr.add(i) as *mut __m512i, data);
-        }
-        i += 64;
-    }
-    _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
-    // This ensures data is globally visible before we signal
-    // that this operation is complete.
-
-    // Tail
-    if i < src.len() {
-        dst[i..].copy_from_slice(&src[i..]);
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn simd_copy_avx2(src: &[u8], dst: &mut [u8]) {
-    let src_ptr = src.as_ptr();
-    let dst_ptr = dst.as_mut_ptr();
-    let mut i = 0;
-    let simd_end = src.len().saturating_sub(31);
-
-    while i < simd_end {
-        unsafe {
-            let data = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
-            _mm256_storeu_si256(dst_ptr.add(i) as *mut __m256i, data);
-        }
-        i += 32;
-    }
-
-    if i < src.len() {
-        let remaining_src = &src[i..];
-        let remaining_dst = &mut dst[i..];
-        remaining_dst.copy_from_slice(remaining_src);
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
-    if src.len() < 1_048_576 {
-        unsafe {
-            return simd_copy_avx2(src, dst);
-        }
-    }
-
-    let src_ptr = src.as_ptr();
-    let dst_ptr = dst.as_mut_ptr();
-    let mut i = 0;
-
-    // Work in 32-byte blocks
-    let simd_end = src.len() & !31;
-    while i < simd_end {
-        unsafe {
-            let data = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
-            _mm256_stream_si256(dst_ptr.add(i) as *mut __m256i, data);
-        }
-        i += 32;
-    }
-
-    _mm_sfence(); // CRITICAL: Flushes non-temporal store buffers to RAM.
-    // This ensures data is globally visible before we signal
-    // that this operation is complete.
-    // Tail
-    if i < src.len() {
-        dst[i..].copy_from_slice(&src[i..]);
-    }
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-#[inline]
-unsafe fn simd_copy_sse2(src: &[u8], dst: &mut [u8]) {
-    let src_ptr = src.as_ptr();
-    let dst_ptr = dst.as_mut_ptr();
-    let mut i = 0;
-    let simd_end = src.len().saturating_sub(15);
-
-    while i < simd_end {
-        unsafe {
-            let data = _mm_loadu_si128(src_ptr.add(i) as *const __m128i);
-            _mm_storeu_si128(dst_ptr.add(i) as *mut __m128i, data);
-        }
-        i += 16;
-    }
-
-    if i < src.len() {
-        let remaining_src = &src[i..];
-        let remaining_dst = &mut dst[i..];
-        remaining_dst.copy_from_slice(remaining_src);
-    }
-}
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx512f", enable = "avx512bw")]
-#[inline]
-unsafe fn is_all_zero_avx512(data: &[u8]) -> bool {
-    let ptr = data.as_ptr();
-    let mut i = 0;
-    let simd_end = data.len().saturating_sub(63);
-
-    while i < simd_end {
-        unsafe {
-            let chunk = _mm512_loadu_si512(ptr.add(i) as *const __m512i);
-
-            if _mm512_test_epi8_mask(chunk, chunk) != 0 {
-                return false;
-            }
-        }
-        i += 64;
-    }
-    data[i..].iter().all(|&b| b == 0)
-}
-
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2")]
-#[inline]
-unsafe fn is_all_zero_avx2(data: &[u8]) -> bool {
-    let ptr = data.as_ptr();
-    let mut i = 0;
-    let simd_end = data.len().saturating_sub(31);
-
-    while i < simd_end {
-        unsafe {
-            let chunk = _mm256_loadu_si256(ptr.add(i) as *const __m256i);
-
-            if _mm256_testz_si256(chunk, chunk) == 0 {
-                // ← Correct
-                return false;
-            }
-        }
-        i += 32;
-    }
-    data[i..].iter().all(|&b| b == 0)
-}
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse2")]
-#[inline]
-unsafe fn is_all_zero_sse2(data: &[u8]) -> bool {
-    let ptr = data.as_ptr();
-    let mut i = 0;
-    let simd_end = data.len().saturating_sub(15);
-
-    while i < simd_end {
-        unsafe {
-            let chunk = _mm_loadu_si128(ptr.add(i) as *const __m128i);
-            let zero = _mm_setzero_si128();
-            let cmp = _mm_cmpeq_epi8(chunk, zero);
-            let mask = _mm_movemask_epi8(cmp);
-            if mask != 0xFFFF {
-                return false;
-            }
-            i += 16;
-        }
-    }
-    data[i..].iter().all(|&b| b == 0)
-}
-
-// Main extraction loop: process partitions in descending size order
-// for better progress bar visibility and cache behavior.
-impl Cmd {
+impl<'a> Extractor<'a> {
     fn run_clean(&self, base_dir: Option<&Path>) -> Result<()> {
         let base_dir = match base_dir {
             Some(p) => p.to_path_buf(),
@@ -679,7 +178,7 @@ impl Cmd {
     // 5. Verify, sanity-check, and finalize output
     pub fn run(&self) -> Result<()> {
         // Handle subcommands early (before extraction logic)
-        if let Some(subcmd) = &self.subcmd {
+        if let Some(subcmd) = &self.cmd.subcmd {
             match subcmd {
                 SubCmd::Clean { output_dir } => {
                     return self.run_clean(output_dir.as_deref());
@@ -690,7 +189,7 @@ impl Cmd {
         // Initialize SIMD detection early - this ensures SIMD capabilities are
         // detected and available for all operations throughout the extraction
         let simd = CpuSimd::get();
-        if let Some(t) = self.threads {
+        if let Some(t) = self.cmd.threads {
             match t {
                 0 => { /* Use default - valid */ }
                 1..=256 => { /* Valid range */ }
@@ -705,7 +204,7 @@ impl Cmd {
             }
         }
 
-        let payload_path = self.positional_payload.as_ref()
+        let payload_path = self.cmd.positional_payload.as_ref()
             .ok_or_else(|| anyhow::anyhow!(
                 "No payload file specified.\n\
         \n\
@@ -756,7 +255,7 @@ impl Cmd {
         );
 
         // 2. LIST MODE: Shows partition details and identifies Incremental vs Full updates.
-        if self.list {
+        if self.cmd.list {
             manifest
                 .partitions
                 .sort_unstable_by(|p1, p2| p1.partition_name.cmp(&p2.partition_name));
@@ -833,7 +332,7 @@ impl Cmd {
         }
 
         // 4. Continue with extraction setup...
-        for partition in &self.partitions {
+        for partition in &self.cmd.partitions {
             if !manifest
                 .partitions
                 .iter()
@@ -856,14 +355,14 @@ impl Cmd {
         });
 
         // Optional stats state
-        let total_start = if self.stats {
+        let total_start = if self.cmd.stats {
             Some(Instant::now())
         } else {
             None
         };
 
         // Use channels to minimize contention: workers send Stat structs to a receiver
-        let (stats_sender, stats_receiver) = if self.stats {
+        let (stats_sender, stats_receiver) = if self.cmd.stats {
             let (s, r) = unbounded::<Stat>();
             (Some(s), Some(r))
         } else {
@@ -871,7 +370,7 @@ impl Cmd {
         };
 
         // Channel for hash records
-        let (hash_sender, hash_receiver) = if self.print_hash {
+        let (hash_sender, hash_receiver) = if self.cmd.print_hash {
             let (s, r) = unbounded::<HashRec>();
             (Some(s), Some(r))
         } else {
@@ -882,13 +381,17 @@ impl Cmd {
         let selected_count: usize = manifest
             .partitions
             .iter()
-            .filter(|u| self.partitions.is_empty() || self.partitions.contains(&u.partition_name))
+            .filter(|u| {
+                self.cmd.partitions.is_empty() || self.cmd.partitions.contains(&u.partition_name)
+            })
             .count();
 
         // Strict mode sanity: ensure hashes exist when required
-        if self.strict {
+        if self.cmd.strict {
             for update in &manifest.partitions {
-                if self.partitions.is_empty() || self.partitions.contains(&update.partition_name) {
+                if self.cmd.partitions.is_empty()
+                    || self.cmd.partitions.contains(&update.partition_name)
+                {
                     // Partition-level hash must exist
                     ensure!(
                         update
@@ -1002,7 +505,7 @@ impl Cmd {
         }));
 
         // Inform the user about effective concurrency when -t/--threads is provided
-        if let Some(t) = self.threads
+        if let Some(t) = self.cmd.threads
             && t > 0
         {
             eprintln!(
@@ -1034,7 +537,8 @@ impl Cmd {
                 .partitions
                 .iter()
                 .filter(|update| {
-                    self.partitions.is_empty() || self.partitions.contains(&update.partition_name)
+                    self.cmd.partitions.is_empty()
+                        || self.cmd.partitions.contains(&update.partition_name)
                 })
                 .enumerate()
             {
@@ -1086,7 +590,7 @@ impl Cmd {
                     state.0.push(out_path);
                 }
 
-                let part_start = if self.stats {
+                let part_start = if self.cmd.stats {
                     Some(Instant::now())
                 } else {
                     None
@@ -1159,7 +663,7 @@ impl Cmd {
                     for chunk in ops.chunks(chunk_size) {
                         let progress_bar = progress_bar.clone();
                         let ctx = ctx.clone();
-                        let simd = simd;
+
 
                         scope.spawn(move |_| {
                             let mut chunk_bytes_processed = 0usize; // Buffer for this thread's chunk
@@ -1306,7 +810,7 @@ impl Cmd {
         self.display_extracted_folder_size(&partition_dir)?;
 
         // Automatically open the extracted folder (unless disabled)
-        if !self.no_open {
+        if !self.cmd.no_open {
             self.open_extracted_folder(&partition_dir)?;
         }
 
@@ -1347,7 +851,7 @@ impl Cmd {
 
         let mut computed_digest_opt: Option<[u8; 32]> = None;
 
-        if !self.no_verify {
+        if !self.cmd.no_verify {
             if let Some(hash) = update
                 .new_partition_info
                 .as_ref()
@@ -1364,7 +868,7 @@ impl Cmd {
                         return;
                     }
                 }
-            } else if self.strict {
+            } else if self.cmd.strict {
                 ctx.cancellation_token.store(true, Ordering::Release);
                 eprintln!(
                     "\nCritical error: Strict mode: missing partition hash for '{}'",
@@ -1378,7 +882,7 @@ impl Cmd {
             return;
         }
 
-        if self.sanity && is_all_zero_with_simd(simd, final_slice) {
+        if self.cmd.sanity && is_all_zero_with_simd(simd, final_slice) {
             ctx.cancellation_token.store(true, Ordering::Release);
             eprintln!(
                 "\nCritical error: Sanity check failed for '{}'",
@@ -1522,7 +1026,10 @@ impl Cmd {
                     Ok(0) => break,
                     Ok(n) => total_read += n,
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e).context("failed to read decompressed data directly to extent"),
+                    Err(e) => {
+                        return Err(e)
+                            .context("failed to read decompressed data directly to extent");
+                    }
                 }
             }
             let bytes_read_aligned = total_read.div_ceil(block_size) * block_size;
@@ -1530,11 +1037,14 @@ impl Cmd {
                 bytes_read_aligned == dst_len,
                 "more dst blocks than data, even with padding"
             );
-            
-            // Force the decoder to hit EOF to trigger trailing CRC/checksum logic, properly bubbling up any I/O errors 
+
+            // Force the decoder to hit EOF to trigger trailing CRC/checksum logic, properly bubbling up any I/O errors
             let mut eof_check = [0u8; 1];
             let extra_bytes = reader.read(&mut eof_check).context("failed to check EOF")?;
-            ensure!(extra_bytes == 0, "stream contained more data than extent capacity");
+            ensure!(
+                extra_bytes == 0,
+                "stream contained more data than extent capacity"
+            );
             return Ok(());
         }
 
@@ -1548,7 +1058,9 @@ impl Cmd {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
-                        writer.write_all(&buf[..n]).context("failed to write to ExtentsWriter")?;
+                        writer
+                            .write_all(&buf[..n])
+                            .context("failed to write to ExtentsWriter")?;
                         total_read += n;
                     }
                     Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -1662,7 +1174,7 @@ impl Cmd {
                     );
 
                     // LOCALIZED TEMP: Create in output dir to prevent cross-partition copy performance hits
-                    let temp_file = if let Some(ref out_dir) = self.output_dir {
+                    let temp_file = if let Some(ref out_dir) = self.cmd.output_dir {
                         fs::create_dir_all(out_dir)?;
                         NamedTempFile::new_in(out_dir)
                     } else {
@@ -1742,7 +1254,7 @@ impl Cmd {
         Ok((partition, partition_len as usize, path))
     }
 
-    fn extract_data<'a>(&self, op: &InstallOperation, payload: &'a Payload) -> Result<&'a [u8]> {
+    fn extract_data<'b>(&self, op: &InstallOperation, payload: &'b Payload) -> Result<&'b [u8]> {
         let data_len = op.data_length.context("data_length not defined")? as usize;
         let offset = op.data_offset.context("data_offset not defined")? as usize;
 
@@ -1759,7 +1271,7 @@ impl Cmd {
 
         let data = &payload.data[offset..end_offset];
 
-        if !self.no_verify
+        if !self.cmd.no_verify
             && let Some(hash) = &op.data_sha256_hash
         {
             self.verify_sha256(data, hash)
@@ -1825,7 +1337,6 @@ impl Cmd {
     /// Validates that all dst_extents across all InstallOperations are non-overlapping.
     /// Implementation uses an O(n log n) sorted interval sweep.
     /// This is acceptable because extents per partition are typically small.
-
     fn validate_non_overlapping_extents(&self, operations: &[InstallOperation]) -> Result<()> {
         let mut extents: Vec<(u64, u64)> = Vec::with_capacity(operations.len() * 2);
 
@@ -1871,7 +1382,7 @@ impl Cmd {
     }
 
     fn create_partition_dir(&self) -> Result<(PathBuf, bool)> {
-        let dir = match &self.output_dir {
+        let dir = match &self.cmd.output_dir {
             Some(output_base) => {
                 let now = Local::now();
                 let timestamp_folder = format!("{}", now.format("extracted_%Y-%m-%d_%H-%M-%S"));
@@ -1894,7 +1405,7 @@ impl Cmd {
 
     fn get_threadpool(&self) -> Result<ThreadPool> {
         let mut builder = ThreadPoolBuilder::new();
-        if let Some(t) = self.threads
+        if let Some(t) = self.cmd.threads
             && t > 0
         {
             builder = builder.num_threads(t);
@@ -2018,42 +1529,3 @@ impl Cmd {
         })
     }
 }
-
-const FRIENDLY_HELP: &str = color_print::cstr!(
-    "\
-{before-help}<bold><underline>{name} {version}</underline></bold>
-{about}
-
-<bold>QUICK START</bold>
-  • Drag & drop an OTA .zip or payload.bin onto the executable.
-  • Or run via command line: <cyan>otaripper update.zip</cyan>
-
-<bold>COMMON TASKS</bold>
-  • <bold>List</bold> partitions:                            otaripper -l update.zip
-  • <bold>Extract everything</bold>:                         otaripper update.zip
-  • <bold>Extract specific</bold>:                           otaripper update.zip -p boot,init_boot,vendor_boot
-  • <bold>Disable auto-open folder after extraction: </bold> otaripper update.zip -n
-
-<bold>CLEANUP</bold>
-    • <bold>Remove extracted folders</bold>:                 otaripper clean
-    • <bold>Clean in specific directory</bold>:              otaripper clean -o /path/to/dir
-
-<bold>SAFETY & INTEGRITY</bold>
-  • SHA-256 verification is <green>enabled by default</green>.
-  • Partial files are <red>automatically deleted</red> on failure.
-  • Use <yellow>--strict</yellow> to require manifest hashes and enforce verification.
-  • Skip verification (not recommended): <yellow>--no-verify</yellow>
-
-<bold>QUALITY OF LIFE</bold>
-  • Automatically opens extracted folder after success.
-  • Disable opening folder: <yellow>-n</yellow> or <yellow>--no-open</yellow>
-
-{usage-heading}
-  {usage}
-
-<bold>OPTIONS</bold>
-{all-args}
-
-<bold>PROJECT</bold>: <blue>https://github.com/syedinsaf/otaripper</blue>
-{after-help}"
-);

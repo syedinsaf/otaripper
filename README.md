@@ -64,7 +64,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-|                         | otaripper v2.1 | payload-dumper-go | payload_dumper (Python) |
+|                         | otaripper v2.2 | payload-dumper-go | payload_dumper (Python) |
 | ----------------------- | -------------- | ----------------- | ----------------------- |
 | Output verification     | ✅ SHA-256      | ❌                | ❌                      |
 | SIMD optimization       | ✅ AVX-512 / AVX2 / SSE2 | ❌        | ❌                      |
@@ -86,11 +86,12 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **2.1** refines critical hot paths by:
+Version **2.2.0** brings significant architectural scalability and performance refinement by:
 
-* specializing single-extent writes
-* reducing bounds checks in tight loops
-* using cache-bypassing SIMD stores for large write-once buffers
+* **Modular Engine Architecture**: Breaking the monolithic extraction logic into specialized `extractor` and `simd` modules.
+* **Thread-Local Buffer Pooling**: Drastically amortizing memory allocations across deep Rayon threadpools.
+* **Zero-Copy Decompression**: Triggering purely alloc-free extraction paths when output blocks map cleanly to continuous extents.
+* **Strict SIMD Encapsulation**: Cleanly isolating CPU vector operations (`AVX-512`, `AVX2`, `SSE2`) through non-temporal cache-bypassing mechanisms.
 
 ```
 

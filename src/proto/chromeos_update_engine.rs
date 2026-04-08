@@ -105,17 +105,7 @@ pub struct InstallOperation {
 }
 /// Nested message and enum types in `InstallOperation`.
 pub mod install_operation {
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum Type {
         /// Replace destination extents w/ attached data.
@@ -226,17 +216,7 @@ pub struct CowMergeOperation {
 }
 /// Nested message and enum types in `CowMergeOperation`.
 pub mod cow_merge_operation {
-    #[derive(
-        Clone,
-        Copy,
-        Debug,
-        PartialEq,
-        Eq,
-        Hash,
-        PartialOrd,
-        Ord,
-        ::prost::Enumeration
-    )]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
     #[repr(i32)]
     pub enum Type {
         /// identical blocks
@@ -379,10 +359,10 @@ pub struct VabcFeatureSet {
 pub struct DynamicPartitionMetadata {
     /// All updatable groups present in |partitions| of this DeltaArchiveManifest.
     /// - If an updatable group is on the device but not in the manifest, it is
-    ///    not updated. Hence, the group will not be resized, and partitions cannot
-    ///    be added to or removed from the group.
+    ///   not updated. Hence, the group will not be resized, and partitions cannot
+    ///   be added to or removed from the group.
     /// - If an updatable group is in the manifest but not on the device, the group
-    ///    is added to the device.
+    ///   is added to the device.
     #[prost(message, repeated, tag = "1")]
     pub groups: ::prost::alloc::vec::Vec<DynamicPartitionGroup>,
     /// Whether dynamic partitions have snapshots during the update. If this is
