@@ -46,6 +46,13 @@ otaripper is structured around three core principles, refined in v2.1 to favor *
 * **Verification Engine** — SHA-256 validation and sanity checking
 * **Progress Monitor** — Lock-free progress tracking with minimal redraw overhead
 
+### Code Structure (Modular Refactor)
+
+To improve maintainability and performance isolation, the underlying operation code is cleanly decoupled:
+* `src/cmd/mod.rs` — CLI argument parsing, subcommands, and high-level orchestration.
+* `src/cmd/extractor.rs` — Core extraction logic, mmap handling, concurrent worker pool coordination, and zero-copy data routing.
+* `src/cmd/simd.rs` — Platform-specific SIMD execution paths, CPU detection, and block-optimized copy routines.
+
 ---
 
 ## Memory Management
@@ -92,6 +99,7 @@ otaripper:
 │ - Disjoint extents only             │
 │ - No locks in hot path              │
 │ - Thread-local decompression        │
+│ - 1 MiB thread-local buffer pool    │
 └─────────────────────────────────────┘
                 ↓
 ┌─────────────────────────────────────┐
@@ -103,20 +111,24 @@ otaripper:
 
 ---
 
-### Fast-Path Write Specialization (v2.1)
+### Fast-Path Write Specialization / Zero-Copy Decompression
 
-In v2.1, otaripper introduces a dedicated fast path for the most common case:
-**operations that write to a single contiguous destination extent**.
+otaripper implements a strict fast path for the most common case:
+**operations that target exactly one contiguous destination extent**.
 
-When an operation resolves to exactly one destination extent, otaripper bypasses
-the generic multi-extent writer and performs a direct slice write. This eliminates:
+When reading or decompressing (e.g., bzip2, xz) into a single extent, the data is pushed **directly into the memory-mapped file**, skipping intermediary buffering altogether.
 
-* Iterator overhead
-* Per-extent state tracking
-* Redundant bounds checks
+This single-extent zero-copy path eliminates:
+* Redundant buffering and copying round-trips
+* Iterator overhead and per-extent bounds checks
 
-This specialization significantly reduces instruction count for large partitions,
-where most operations are contiguous.
+**Data Integrity Verification**: Because the zero-copy fast path streams straight to the memory map, otaripper intentionally forces the decompressor to hit EOF. This guarantees trailing CRC/checksum logic in the underlying compression stream is evaluated and correctly bubbles up any underlying I/O corruption errors.
+
+---
+
+### Thread-Local Buffer Pooling
+
+For multi-extent writes where zero-copy streaming isn't possible, memory allocation overhead is minimized via a thread-local buffer pool (`COPY_BUFFER`). Rayon workers share 1 MiB buffers which amortize allocation costs across iterative decompression tasks and provide a sufficiently large chunk size to safely trigger SIMD non-temporal streaming writes on the output.
 
 ---
 
