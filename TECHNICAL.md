@@ -398,6 +398,6 @@ Likely causes:
 
 ---
 
-For user-facing documentation, see **README.md**.
+For user-facing documentation, see [README.md](README.md)
 
 ---
