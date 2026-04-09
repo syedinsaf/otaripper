@@ -2,7 +2,7 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v2.2 Note: **
+> **v2.2 Note:**
 > This release introduces significant architectural scalability and performance refinement.
 > The monolithic execution logic has been decoupled into specialized modules. Furthermore, memory allocation overhead has been significantly reduced via thread-local buffer pooling, enabling purely alloc-free zero-copy decompression paths.
 
