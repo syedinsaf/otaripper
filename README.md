@@ -111,8 +111,7 @@ Performance scales with:
 * compression format
 * CPU SIMD capability
 
-For architectural details, see
-[TECHNICAL.md#performance-architecture](TECHNICAL.md#performance-architecture)
+For architectural details, see [TECHNICAL.md](TECHNICAL.md)
 
 ---
 
