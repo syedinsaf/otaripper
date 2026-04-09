@@ -2,9 +2,9 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v2.1 Note**
-> Version 2.1 focuses on *execution-level refinements* rather than architectural changes.
-> The core design remains unchanged, but hot paths have been tightened, cache behavior improved, and performance heuristics made more explicit and predictable.
+> **v2.2 Note**
+> Version 2.2 introduces significant architectural scalability and performance refinement.
+> The monolithic execution logic has been decoupled into specialized modules. Furthermore, memory allocation overhead has been significantly reduced via thread-local buffer pooling, enabling purely alloc-free zero-copy decompression paths.
 
 ---
 
