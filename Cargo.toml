@@ -2,7 +2,7 @@
 name = "otaripper"
 version = "2.2.0"
 edition = "2024"
-rust-version = "1.93.0"
+rust-version = "1.95.0"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
 description = "Ultra-fast partition extractor for Android OTA .zip and payload.bin files"
 repository = "https://github.com/syedinsaf/otaripper"
