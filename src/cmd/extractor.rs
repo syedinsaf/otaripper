@@ -641,9 +641,8 @@ impl<'a> Extractor<'a> {
                             Ok(bytes) => {
                                 progress_bar.inc(bytes as u64);
                             }
-                            Err(e) => {
+                            Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                                 ctx.cancellation_token.store(true, Ordering::Release);
-                                let mut slot = ctx.first_error.lock().unwrap();
                                 if slot.is_none() {
                                     *slot = Some(e.context(format!(
                                         "Error in partition '{}'",
@@ -652,6 +651,7 @@ impl<'a> Extractor<'a> {
                                 }
                                 return Ok(());
                             }
+                            Err(_) => return Ok(()),
                         }
                     }
 
@@ -688,17 +688,17 @@ impl<'a> Extractor<'a> {
                                     Ok(bytes) => {
                                         chunk_bytes_processed += bytes;
                                     }
-                                    Err(e) => {
+                                    Err(e) if let Ok(mut slot) = ctx.first_error.lock() => {
                                         ctx.cancellation_token.store(true, Ordering::Release);
-                                        let mut slot = ctx.first_error.lock().unwrap();
                                         if slot.is_none() {
                                             *slot = Some(e.context(format!(
                                                 "Error in partition '{}'",
                                                 ctx.part_name
                                             )));
                                         }
-                                        break;
+                                        return;
                                     }
+                                    Err(_) => return,
                                 }
                             }
 
@@ -1476,40 +1476,38 @@ impl<'a> Extractor<'a> {
         }
 
         // Cross-platform folder opening
-        #[cfg(target_os = "windows")]
-        {
-            use std::process::Command;
-            let _ = Command::new("explorer")
-                .arg(dir_path)
-                .spawn()
-                .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            use std::process::Command;
-            let _ = Command::new("open")
-                .arg(dir_path)
-                .spawn()
-                .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            use std::process::Command;
-
-            // On KDE, using xdg-open triggers a harmless but noisy Qt portal warning (related to kioclient registration).
-            // Spawning Dolphin directly avoids this, while still opening the folder correctly.
-            if Command::new("dolphin").arg(dir_path).spawn().is_ok() {
-                return Ok(());
+        cfg_select! {
+            target_os = "windows" => {
+                use std::process::Command;
+                let _ = Command::new("explorer")
+                    .arg(dir_path)
+                    .spawn()
+                    .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
             }
-
-            // Fallback to standard xdg-open for non-KDE desktops
-            if Command::new("xdg-open").arg(dir_path).spawn().is_ok() {
-                return Ok(());
+            target_os = "macos" => {
+                use std::process::Command;
+                let _ = Command::new("open")
+                    .arg(dir_path)
+                    .spawn()
+                    .map_err(|e| eprintln!("Warning: Failed to open folder: {}", e));
             }
+            target_os = "linux" => {
+                use std::process::Command;
 
-            eprintln!("Warning: Unable to open folder (dolphin and xdg-open failed)");
+                // On KDE, using xdg-open triggers a harmless but noisy Qt portal warning (related to kioclient registration).
+                // Spawning Dolphin directly avoids this, while still opening the folder correctly.
+                if Command::new("dolphin").arg(dir_path).spawn().is_ok() {
+                    return Ok(());
+                }
+
+                // Fallback to standard xdg-open for non-KDE desktops
+                if Command::new("xdg-open").arg(dir_path).spawn().is_ok() {
+                    return Ok(());
+                }
+
+                eprintln!("Warning: Unable to open folder (dolphin and xdg-open failed)");
+            }
+            _ => {}
         }
 
         Ok(())
