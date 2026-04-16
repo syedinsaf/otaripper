@@ -185,24 +185,22 @@ fn simd_copy_chunk(_simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
     dst.copy_from_slice(src);
 }
 
-/// Zero-check with SIMD already selected (hot path)
 #[inline(always)]
 pub(crate) fn is_all_zero_with_simd(simd: CpuSimd, data: &[u8]) -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        match simd {
-            CpuSimd::Avx512 => unsafe { is_all_zero_avx512(data) },
-            CpuSimd::Avx2 => unsafe { is_all_zero_avx2(data) },
-            CpuSimd::Sse2 => unsafe { is_all_zero_sse2(data) },
-            CpuSimd::None => data.iter().all(|&b| b == 0),
+    cfg_select! {
+        target_arch = "x86_64" => {
+            match simd {
+                CpuSimd::Avx512 => unsafe { is_all_zero_avx512(data) },
+                CpuSimd::Avx2 => unsafe { is_all_zero_avx2(data) },
+                CpuSimd::Sse2 => unsafe { is_all_zero_sse2(data) },
+                CpuSimd::None => data.iter().all(|&b| b == 0),
+            }
         }
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        // Non-x86 always scalar (auto-vectorized by LLVM)
-        let _ = simd;
-        data.iter().all(|&b| b == 0)
+        _ => {
+            // Non-x86 always scalar (auto-vectorized by LLVM)
+            let _ = simd;
+            data.iter().all(|&b| b == 0)
+        }
     }
 }
 
