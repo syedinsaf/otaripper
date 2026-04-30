@@ -8,6 +8,7 @@ permissions:
 
 env:
   BIN_NAME: otaripper
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
 # =========================
@@ -27,7 +28,7 @@ jobs:
             outname: otaripper-linux-arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -75,7 +76,7 @@ jobs:
           tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
           sha256sum ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.outname }}
           path: |
@@ -97,7 +98,7 @@ jobs:
             outname: otaripper-windows-gnu-x86_64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -119,7 +120,7 @@ jobs:
           zip -r ${{ matrix.outname }}.zip pkg
           sha256sum ${{ matrix.outname }}.zip > ${{ matrix.outname }}.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.outname }}
           path: |
@@ -140,7 +141,7 @@ jobs:
             outname: otaripper-macos-arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -162,7 +163,7 @@ jobs:
           tar -czf ${{ matrix.outname }}.tar.gz -C pkg .
           shasum -a 256 ${{ matrix.outname }}.tar.gz > ${{ matrix.outname }}.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.outname }}
           path: |
@@ -176,7 +177,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -217,7 +218,7 @@ jobs:
           zip -j otaripper-android-arm64.zip pkg/*
           sha256sum otaripper-android-arm64.zip > otaripper-android-arm64.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: otaripper-android-arm64
           path: |
