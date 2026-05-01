@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Extract versions
         shell: bash
@@ -57,7 +57,7 @@ jobs:
             outname: linux-arm64
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -103,7 +103,7 @@ jobs:
           tar -czf "$NAME.tar.gz" -C pkg .
           sha256sum "$NAME.tar.gz" > "$NAME.sha256"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
           path: |
@@ -126,7 +126,7 @@ jobs:
             outname: windows-gnu-x86_64
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -147,7 +147,7 @@ jobs:
           7z a "$NAME.zip" ./pkg/*
           sha256sum "$NAME.zip" > "$NAME.sha256"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
           path: |
@@ -169,7 +169,7 @@ jobs:
             outname: macos-arm64
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -191,7 +191,7 @@ jobs:
           tar -czf "$NAME.tar.gz" -C pkg .
           shasum -a 256 "$NAME.tar.gz" > "$NAME.sha256"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outname }}
           path: |
@@ -206,7 +206,7 @@ jobs:
     needs: version-check
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -240,7 +240,7 @@ jobs:
           zip -j "$NAME.zip" pkg/*
           sha256sum "$NAME.zip" > "$NAME.sha256"
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: android-arm64
           path: |
@@ -257,7 +257,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
