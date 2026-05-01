@@ -980,7 +980,7 @@ impl<'a> Extractor<'a> {
             }
             Type::ReplaceXz => {
                 let data = self.extract_data(op, payload)?;
-                let mut decoder = xz2::read::XzDecoder::new(data);
+                let mut decoder = liblzma::read::XzDecoder::new(data);
                 self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
                 Ok(total_dst_size)
             }

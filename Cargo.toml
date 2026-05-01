@@ -29,7 +29,7 @@ rayon = "1.12.0"
 ring = "0.17.14"
 sysinfo = "0.38.4"
 tempfile = "3.27.0"
-xz2 = "0.1.7"
+liblzma = "0.4.6"
 zip = { version = "8.6.0", default-features = false, features = [
   "deflate",
   "bzip2",
@@ -39,7 +39,7 @@ libc = "0.2.186"
 
 # Compatibility: Static liblzma only on musl to avoid glibc x86-64-v4 issues
 [target.'cfg(target_env = "musl")'.dependencies]
-xz2 = { version = "0.1.7", features = ["static"] }
+liblzma = { version = "0.4.6", features = ["static"] }
 
 
 [profile.release]
