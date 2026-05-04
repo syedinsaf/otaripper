@@ -1,4 +1,69 @@
-# Changelog – **otaripper v2.1.0**
+# Changelog
+
+## **otaripper v2.2.1** (2026-05-04)
+
+### Modern Decompression & ARM64 Support
+
+This release upgrades the decompression engine to support modern Android OTA payloads using the ARM64 BCJ filter, resolving decompression failures on newer devices like Xiaomi HyperOS.
+
+---
+
+## Decompression Engine
+
+* **Upgraded to `liblzma v0.4.6`**
+  * Replaced `xz2` with a maintained `liblzma` fork (XZ 5.8 backend).
+  * Fixed crashes and "Compression method not supported" errors when extracting modern OTAs.
+  * Ensures full support for ARM64 BCJ filters across all platforms.
+* **Musl Compatibility**
+  * Maintained robust static linking for `musl` builds, ensuring highly portable Linux binaries.
+
+---
+
+## CI & Infrastructure
+
+* **GitHub Actions Modernization**
+  * Upgraded all CI workflows to Version 5.
+  * Resolved Node 20 deprecation warnings by bumping underlying actions.
+  * Improved build runner reliability and verification speed.
+
+---
+
+## Credits
+
+Special thanks to **ArKT-7** for the critical contribution of `liblzma` modernization and ARM64 payload support.
+
+---
+
+## **otaripper v2.2.0** (2026-05-04)
+
+### Architectural & Performance Refactor
+
+This major release re-architects the extraction engine for significantly improved scalability and performance on modern high-core-count systems.
+
+---
+
+## Engine Refactoring
+
+* **Modular Architecture**
+  * Decoupled monolithic logic into specialized `extractor` and `simd` modules.
+  * Improved maintainability and performance isolation of platform-specific code.
+* **Thread-Local Buffer Pooling**
+  * Drastically reduced memory allocation overhead via thread-local buffer reuse in Rayon workers.
+  * Enables purely alloc-free zero-copy decompression paths.
+* **SIMD Optimization**
+  * Optimized non-temporal cache-bypassing mechanisms for `AVX-512`, `AVX2`, and `SSE2`.
+  * Improved runtime CPU feature detection.
+
+## Build & Tooling
+
+* **Native Build Scripts**
+  * Added `build.sh` (Linux/macOS) and `build.ps1` (Windows) for local, CPU-optimized builds.
+* **Protobuf Modernization**
+  * Refactored protobuf module structure for better build-time stability.
+
+---
+
+## **otaripper v2.1.0** (2026-04-30)
 
 ### Performance & Architecture Upgrade
 
