@@ -1,6 +1,6 @@
 [package]
 name = "otaripper"
-version = "2.2.0"
+version = "2.2.1"
 edition = "2024"
 rust-version = "1.95.0"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
