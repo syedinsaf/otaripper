@@ -1,5 +1,22 @@
 # Changelog
 
+## **otaripper v2.2.2** (2026-05-05)
+
+### Arbscan Integration
+
+This release merges the standalone `arbscan` utility directly into the `otaripper` codebase as a native subcommand.
+
+---
+
+## New Features
+
+* **`otaripper arbscan` subcommand**
+  * Built-in support for analyzing OEM Anti-Rollback (ARB) metadata from Qualcomm bootloader images (e.g., `xbl_config.img`).
+  * Extracts Major/Minor versions and ARB index automatically.
+  * Optionally outputs JSON metadata for further automation.
+  * Eliminates the need to maintain a separate binary for bootloader analysis.
+
+---
 ## **otaripper v2.2.1** (2026-05-04)
 
 ### Modern Decompression & ARM64 Support
