@@ -185,10 +185,10 @@ Disable automatic folder opening:
 otaripper ota.zip -n
 ```
 
-Analyze Qualcomm bootloader ARB metadata:
+Analyze Qualcomm bootloader ARB metadata (accepts `.img`, `.bin`, or `.zip`):
 
 ```bash
-otaripper arbscan xbl_config.img
+otaripper arb update.zip or otaripper arb xbl_config.img
 ```
 
 ---
@@ -227,7 +227,7 @@ and refuses to operate on filesystem roots for safety.
 | `-t, --threads`    | Thread control (1–256, 0 = auto)    |
 | `-n, --no-open`    | Disable folder auto-open            |
 | `clean`            | Remove `extracted_*` folders safely |
-| `arbscan`          | Extract ARB metadata from bootloader images |
+| `arbscan`, `arb`   | Extract ARB metadata from bootloader images or payloads |
 
 ---
 
