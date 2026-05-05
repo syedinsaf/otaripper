@@ -12,7 +12,7 @@ This release upgrades the decompression engine to support modern Android OTA pay
 
 * **Upgraded to `liblzma v0.4.6`**
   * Replaced `xz2` with a maintained `liblzma` fork (XZ 5.8 backend).
-  * Fixed crashes and "Compression method not supported" errors when extracting modern OTAs.
+  * Fixed decompression crashes when extracting modern OTAs.
   * Ensures full support for ARM64 BCJ filters across all platforms.
 * **Musl Compatibility**
   * Maintained robust static linking for `musl` builds, ensuring highly portable Linux binaries.
@@ -22,8 +22,8 @@ This release upgrades the decompression engine to support modern Android OTA pay
 ## CI & Infrastructure
 
 * **GitHub Actions Modernization**
-  * Upgraded all CI workflows to Version 5.
-  * Resolved Node 20 deprecation warnings by bumping underlying actions.
+  * Upgraded all CI workflows to latest versions (Version 5/6+).
+  * Eliminated Node.js deprecation warnings by migrating to Node 24-powered actions.
   * Improved build runner reliability and verification speed.
 
 ---
