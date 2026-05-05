@@ -511,31 +511,33 @@ impl<'a> Extractor<'a> {
             }
         }));
 
-        // Inform the user about effective concurrency when -t/--threads is provided
-        if let Some(t) = self.cmd.threads
-            && t > 0
-        {
+        if !self.cmd.quiet {
+            // Inform the user about effective concurrency when -t/--threads is provided
+            if let Some(t) = self.cmd.threads
+                && t > 0
+            {
+                eprintln!(
+                    "Using {} worker thread(s)",
+                    threadpool.current_num_threads()
+                );
+            }
+
+            let bold_bright_red = Style::new().bold().red();
+            let bold_yellow = Style::new().bold().yellow();
+            let bold_bright_green = Style::new().bold().green();
             eprintln!(
-                "Using {} worker thread(s)",
+                "\n{}: do {} close this window! Use {} to cancel safely.",
+                bold_yellow.apply_to("Extraction in progress"),
+                bold_bright_red.apply_to("NOT"),
+                bold_bright_green.apply_to("Ctrl+C")
+            );
+            eprintln!(
+                "Processing {} partitions using {} threads...",
+                selected_count,
                 threadpool.current_num_threads()
             );
+            eprintln!();
         }
-
-        let bold_bright_red = Style::new().bold().red();
-        let bold_yellow = Style::new().bold().yellow();
-        let bold_bright_green = Style::new().bold().green();
-        eprintln!(
-            "\n{}: do {} close this window! Use {} to cancel safely.",
-            bold_yellow.apply_to("Extraction in progress"),
-            bold_bright_red.apply_to("NOT"),
-            bold_bright_green.apply_to("Ctrl+C")
-        );
-        eprintln!(
-            "Processing {} partitions using {} threads...",
-            selected_count,
-            threadpool.current_num_threads()
-        );
-        eprintln!();
         threadpool.scope(|scope| -> Result<()> {
             let multiprogress = MultiProgress::new();
 
@@ -814,10 +816,12 @@ impl<'a> Extractor<'a> {
         }
 
         // Calculate and display extracted folder size
-        self.display_extracted_folder_size(&partition_dir)?;
+        if !self.cmd.quiet {
+            self.display_extracted_folder_size(&partition_dir)?;
+        }
 
         // Automatically open the extracted folder (unless disabled)
-        if !self.cmd.no_open {
+        if !self.cmd.no_open && !self.cmd.quiet {
             self.open_extracted_folder(&partition_dir)?;
         }
 
@@ -825,6 +829,10 @@ impl<'a> Extractor<'a> {
     }
 
     fn create_progress_bar(&self, update: &PartitionUpdate) -> Result<ProgressBar> {
+        if self.cmd.quiet {
+            return Ok(ProgressBar::hidden());
+        }
+
         let total_bytes = update
             .new_partition_info
             .as_ref()
