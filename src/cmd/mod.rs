@@ -1,6 +1,6 @@
+pub mod arbscan;
 pub mod extractor;
 pub mod simd;
-pub mod arbscan;
 
 use crate::cmd::extractor::Extractor;
 use anyhow::Result;
@@ -22,6 +22,7 @@ pub enum SubCmd {
         output_dir: Option<PathBuf>,
     },
     /// Extract OEM Anti-Rollback (ARB) metadata from Qualcomm bootloader images
+    #[clap(aliases = &["arb"])]
     Arbscan {
         /// Disable interactive prompt for JSON output
         #[clap(long)]
