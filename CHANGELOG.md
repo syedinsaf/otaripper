@@ -12,6 +12,9 @@ This release merges the standalone `arbscan` utility directly into the `otarippe
 
 * **`otaripper arbscan` subcommand**
   * Built-in support for analyzing OEM Anti-Rollback (ARB) metadata from Qualcomm bootloader images (e.g., `xbl_config.img`).
+  * **Direct Payload Analysis**: Can now accept a `firmware.zip` or `payload.bin` directly! It hooks into the extraction engine to automatically and silently dump `xbl_config.img` for analysis.
+  * Added convenient shorthand aliases `arb` and `scan` (e.g., `otaripper arb update.zip`).
+  * Added `-n` short flag for `--no-json`.
   * Extracts Major/Minor versions and ARB index automatically.
   * Optionally outputs JSON metadata for further automation.
   * Eliminates the need to maintain a separate binary for bootloader analysis.
