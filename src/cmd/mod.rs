@@ -1,5 +1,6 @@
 pub mod extractor;
 pub mod simd;
+pub mod arbscan;
 
 use crate::cmd::extractor::Extractor;
 use anyhow::Result;
@@ -19,6 +20,16 @@ pub enum SubCmd {
             value_hint = clap::ValueHint::DirPath
         )]
         output_dir: Option<PathBuf>,
+    },
+    /// Extract OEM Anti-Rollback (ARB) metadata from Qualcomm bootloader images
+    Arbscan {
+        /// Disable interactive prompt for JSON output
+        #[clap(long)]
+        no_json: bool,
+
+        /// Path to the bootloader image (e.g., xbl_config.img)
+        #[clap(value_hint = clap::ValueHint::FilePath, value_name = "PATH")]
+        image: PathBuf,
     },
 }
 
@@ -122,6 +133,7 @@ const FRIENDLY_HELP: &str = color_print::cstr!(
   • <bold>Extract everything</bold>:                         otaripper update.zip
   • <bold>Extract specific</bold>:                           otaripper update.zip -p boot,init_boot,vendor_boot
   • <bold>Disable auto-open folder after extraction: </bold> otaripper update.zip -n
+  • <bold>Scan bootloader for ARB metadata: </bold>          otaripper arbscan xbl_config.img
 
 <bold>CLEANUP</bold>
     • <bold>Remove extracted folders</bold>:                 otaripper clean

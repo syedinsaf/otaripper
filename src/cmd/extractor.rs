@@ -183,6 +183,9 @@ impl<'a> Extractor<'a> {
                 SubCmd::Clean { output_dir } => {
                     return self.run_clean(output_dir.as_deref());
                 }
+                SubCmd::Arbscan { no_json, image } => {
+                    return crate::cmd::arbscan::run(*no_json, image);
+                }
             }
         }
 
@@ -210,6 +213,7 @@ impl<'a> Extractor<'a> {
         \n\
         Usage:\n\
           otaripper <payload.zip | payload.bin>\n\
+          otaripper arbscan <xbl_config.img>\n\
         \n\
         Examples:\n\
           • Extract everything:\n\
@@ -217,6 +221,9 @@ impl<'a> Extractor<'a> {
         \n\
           • Extract only specific partitions:\n\
               otaripper update.zip -p boot,init_boot,vendor_boot\n\
+        \n\
+          • Scan bootloader for ARB metadata:\n\
+              otaripper arbscan xbl_config.img\n\
         \n\
         Tip:\n\
           Use comma-separated partition names without .img extension. Names must match the OTA manifest.\n\
