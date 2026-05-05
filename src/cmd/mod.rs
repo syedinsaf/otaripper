@@ -1,6 +1,6 @@
-pub mod arbscan;
 pub mod extractor;
 pub mod simd;
+pub mod arbscan;
 
 use crate::cmd::extractor::Extractor;
 use anyhow::Result;
@@ -25,7 +25,7 @@ pub enum SubCmd {
     #[clap(aliases = &["arb"])]
     Arbscan {
         /// Disable interactive prompt for JSON output
-        #[clap(long)]
+        #[clap(short = 'n', long)]
         no_json: bool,
 
         /// Path to the bootloader image (e.g., xbl_config.img)
@@ -112,6 +112,10 @@ pub struct Cmd {
     #[clap(value_hint = ValueHint::FilePath)]
     #[clap(index = 1, value_name = "PATH")]
     pub(super) positional_payload: Option<PathBuf>,
+
+    /// Internal flag to suppress output
+    #[clap(skip)]
+    pub(super) quiet: bool,
 }
 
 impl Cmd {
