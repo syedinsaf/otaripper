@@ -3,6 +3,8 @@ use std::fs::{write, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+use crate::cmd::extractor::Extractor;
+use crate::cmd::Cmd;
 use serde::Serialize;
 
 const EI_CLASS: usize = 4;
@@ -135,13 +137,64 @@ fn find_hash_header(seg: &[u8]) -> Option<usize> {
 }
 
 pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
-    match do_run(no_json, path) {
+    // Detect magic bytes
+    let mut magic = [0u8; 4];
+    if let Ok(mut f) = File::open(path) {
+        let _ = f.read_exact(&mut magic);
+    }
+
+    if magic == [0x7f, b'E', b'L', b'F'] {
+        // Direct ELF image
+        return match do_run(no_json, path, path) {
+            Ok(()) => Ok(()),
+            Err(e) => anyhow::bail!("{}", e),
+        };
+    }
+
+    // Treat as OTA payload
+    println!("[arbscan] OTA package detected. Extracting xbl_config.img temporarily...");
+    let temp_dir = tempfile::tempdir()?;
+    let cmd = Cmd {
+        subcmd: None,
+        list: false,
+        threads: None,
+        output_dir: Some(temp_dir.path().to_path_buf()),
+        partitions: vec!["xbl_config".to_string()],
+        no_verify: true,
+        strict: false,
+        print_hash: false,
+        sanity: false,
+        stats: false,
+        no_open: true,
+        positional_payload: Some(path.to_path_buf()),
+        quiet: true,
+    };
+
+    let extractor = Extractor { cmd: &cmd };
+    extractor.run()?;
+
+    let mut xbl_path = None;
+    for entry in std::fs::read_dir(temp_dir.path())? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_dir() {
+            let candidate = p.join("xbl_config.img");
+            if candidate.exists() {
+                xbl_path = Some(candidate);
+                break;
+            }
+        }
+    }
+
+    let xbl_path = xbl_path.ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
+
+    match do_run(no_json, &xbl_path, path) {
         Ok(()) => Ok(()),
         Err(e) => anyhow::bail!("{}", e),
     }
 }
 
-fn do_run(no_json: bool, path: &Path) -> Result<(), ArbError> {
+fn do_run(no_json: bool, path: &Path, original_path: &Path) -> Result<(), ArbError> {
     let mut file = File::open(path)?;
 
     let mut ehdr = [0u8; 64];
@@ -248,7 +301,13 @@ fn do_run(no_json: bool, path: &Path) -> Result<(), ArbError> {
     let minor = read_le32(&seg, oem_md_off + 4).unwrap_or(0);
     let arb = read_le32(&seg, oem_md_off + 8).unwrap_or(0);
 
-    println!("[arbscan] Analyzing: {}\n", path.display());
+    if path == original_path {
+        println!("[arbscan] Analyzing: {}\n", original_path.display());
+    } else {
+        let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+        println!("[arbscan] Analyzing: {} (from {})\n", file_name, original_path.display());
+    }
+    
     println!("OEM Metadata");
     println!("────────────");
     println!("  Major Version : {}", major);
@@ -262,7 +321,7 @@ fn do_run(no_json: bool, path: &Path) -> Result<(), ArbError> {
         let meta = ArbMetadata {
             device_model,
             update_label,
-            image: path.display().to_string(),
+            image: original_path.display().to_string(),
             major,
             minor,
             arb,
@@ -270,7 +329,7 @@ fn do_run(no_json: bool, path: &Path) -> Result<(), ArbError> {
             hash_size,
         };
 
-        let out = json_filename(path);
+        let out = json_filename(original_path);
         write(&out, serde_json::to_string_pretty(&meta)?)?;
         println!("\n✔ JSON written: {}", out);
     }
