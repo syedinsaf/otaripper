@@ -86,7 +86,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **2.2.0** brings significant architectural scalability and performance refinement by:
+Version **2.2** brings significant architectural scalability and performance refinement by:
 
 * **Modular Engine Architecture**: Breaking the monolithic extraction logic into specialized `extractor` and `simd` modules.
 * **Thread-Local Buffer Pooling**: Drastically amortizing memory allocations across deep Rayon threadpools.
