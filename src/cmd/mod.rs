@@ -60,6 +60,13 @@ pub struct Cmd {
     )]
     pub(super) list: bool,
 
+    /// Reorganize extracted partitions into subfolders (BOOTLOADER, CRITICAL, MODEM, SYSTEM, EXTRA) for Fastboot Firmware Flasher compatibility
+    #[clap(
+        long = "fff",
+        help = "Reorganize extracted partitions into subfolders for Fastboot Firmware Flasher compatibility."
+    )]
+    pub(super) fff: bool,
+
     /// Number of threads to use during extraction
     #[clap(long, short, value_name = "NUMBER")]
     pub(super) threads: Option<usize>,

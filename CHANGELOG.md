@@ -19,6 +19,9 @@ This release significantly enhances the user experience by automatically parsing
   * It auto-detects the device model and OS version, securely skipping the manual user prompts and directly formatting the JSON output filename (e.g., `CPH2573_15.0.0.860(EX01)_ARB(0).json`).
 * **Silenced Qt Terminal Spam**
   * Explicitly redirects `stdout` and `stderr` to `/dev/null` when spawning GUI file managers (like Dolphin) post-extraction, completely silencing the notorious `QPixmap::scaled: Pixmap is a null pixmap` Linux terminal spam.
+* **Fastboot Firmware Flasher Integration**
+  * Added the `--fff` CLI flag to automatically reorganize extracted partition images into standard subdirectories (`BOOTLOADER`, `CRITICAL`, `MODEM`, `SYSTEM`, `EXTRA`) nested inside a device-named folder (e.g., `CPH2573_15.0.0.860(EX01)`), enabling direct compatibility with firmware flashing scripts.
+  * Added support for reorganizing previously extracted output directories (e.g., `otaripper <dir_path> --fff`), which automatically moves all `.img` files into a clean device sibling directory structure and prompts the user before deleting the original empty folder.
 
 ---
 

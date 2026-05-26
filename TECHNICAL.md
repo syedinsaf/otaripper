@@ -402,6 +402,28 @@ Reports per-partition and total throughput to identify bottlenecks.
 
 ## Advanced Configuration
 
+### Fastboot Firmware Flasher Integration (--fff)
+
+When the `--fff` command-line flag is active, `otaripper` structures the output partition files for compatibility with Fastboot Firmware Flasher scripts.
+
+#### Standard Extraction Mode
+Instead of extracting all `.img` files directly to the root of the output directory, it:
+1. Dynamically parses the target device version (e.g. `CPH2573_15.0.0.860(EX01)`) from the firmware metadata (falling back to `"firmware"` if unavailable).
+2. Resolves each partition to its respective FFF subdirectory:
+   - `BOOTLOADER`: `boot`, `init_boot`, `recovery`, `vbmeta`, `vbmeta_system`, `vbmeta_vendor`, `vendor_boot`
+   - `CRITICAL`: `abl`, `aop`, `aop_config`, `bluetooth`, `cpucp`, `cpucp_dtb`, `devcfg`, `dsp`, `dtbo`, `engineering_cdt`, `featenabler`, `hyp`, `imagefv`, `keymaster`, `oplus_sec`, `oplusstanvbk`, `qupfw`, `shrm`, `splash`, `tz`, `uefi`, `uefisecapp`, `xbl`, `xbl_config`, `xbl_ramdump`
+   - `MODEM`: `modem`
+   - `SYSTEM`: `my_bigball`, `my_carrier`, `my_engineering`, `my_heytap`, `my_manifest`, `my_product`, `my_region`, `my_stock`, `odm`, `product`, `system`, `system_dlkm`, `system_ext`, `vendor`, `vendor_dlkm`
+   - `EXTRA`: Default fallback for any other partitions
+3. Creates the nested directory `<output_dir>/<device_version>/<subfolder>` on-demand, preventing empty directories if certain partitions are not being extracted.
+
+#### Directory Reorganization Mode
+If the positional argument is a directory instead of a payload file/URL, and `--fff` is specified, `otaripper`:
+1. Parses the device name from the input directory name (by removing any `extracted_` prefix and `_YYYY-MM-DD_HH-MM-SS` timestamp suffix).
+2. Creates a sibling directory next to the original folder, named after the device version (e.g. `CPH2573_15.0.0.860(EX01)`).
+3. Groups and moves all `.img` files located at the root of the original directory into their respective category folders (`BOOTLOADER`, `CRITICAL`, etc.) inside the new sibling directory.
+4. Prompts the user before deleting the original folder once the relocation is complete.
+
 ### Environment Variables
 
 * `OTARIPPER_DEBUG_CPU` — show SIMD selection

@@ -232,6 +232,16 @@ Disable automatic folder opening:
 otaripper ota.zip -n
 ```
 
+Reorganize partitions for Fastboot Firmware Flasher (FFF) compatibility:
+
+```bash
+# Organize dynamically during extraction:
+otaripper ota.zip --fff
+
+# Reorganize an already extracted directory:
+otaripper C:\extracted_CPH2573_15.0.0.860(EX01)_2026-05-26_16-41-13 --fff
+```
+
 Analyze Qualcomm bootloader Anti-Rollback (ARB) metadata (accepts `.img`, `.bin`, or `.zip`):
 
 ```bash
@@ -294,6 +304,7 @@ and refuses to operate on filesystem roots for safety.
 | `--stats`          | Show performance statistics         |
 | `-t, --threads`    | Thread control (1–256, 0 = auto)    |
 | `-n, --no-open`    | Disable folder auto-open            |
+| `--fff`            | Nest output folders for Fastboot Firmware Flasher |
 | `clean`            | Remove `extracted_*` folders safely |
 | `arbscan`, `arb`   | Extract ARB metadata from bootloader images or payloads |
 

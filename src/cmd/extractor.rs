@@ -241,6 +241,20 @@ impl<'a> Extractor<'a> {
             ))?
             .clone();
 
+        if payload_path.is_dir() {
+            if self.cmd.fff {
+                return self.reorganize_extracted_dir(&payload_path);
+            } else {
+                bail!(
+                    "\"{}\" is a directory. Extraction is not possible.\n\n\
+                     Hint: If you want to reorganize an already extracted folder for Fastboot Firmware Flasher, use the --fff flag:\n\
+                     otaripper {} --fff",
+                    payload_path.display(),
+                    payload_path.display()
+                );
+            }
+        }
+
         let payload_path_str = payload_path.to_str().context("Path is not valid UTF-8")?;
 
         let metadata = crate::cmd::metadata::fetch_metadata(payload_path_str);
@@ -687,6 +701,7 @@ impl<'a> Extractor<'a> {
                     &stats_sender,
                     &hash_sender,
                     simd,
+                    metadata.as_ref(),
                 )? {
                     break;
                 }
@@ -734,6 +749,7 @@ impl<'a> Extractor<'a> {
         stats_sender: &Option<crossbeam_channel::Sender<Stat>>,
         hash_sender: &Option<crossbeam_channel::Sender<HashRec>>,
         simd: CpuSimd,
+        metadata: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<bool> {
         self.validate_non_overlapping_extents(&update.operations)
             .with_context(|| format!("Invalid extents in partition '{}'", update.partition_name))?;
@@ -747,7 +763,7 @@ impl<'a> Extractor<'a> {
         }
 
         let (partition_file, partition_len, out_path) =
-            self.open_partition_file(update, partition_dir)?;
+            self.open_partition_file(update, partition_dir, metadata)?;
 
         match cleanup_state.lock() {
             Ok(mut guard) => guard.files.push(out_path),
@@ -1544,6 +1560,7 @@ impl<'a> Extractor<'a> {
         &self,
         update: &PartitionUpdate,
         partition_dir: impl AsRef<Path>,
+        _metadata: Option<&std::collections::HashMap<String, String>>,
     ) -> Result<(Arc<MmapMut>, usize, PathBuf)> {
         let partition_len = update
             .new_partition_info
@@ -1552,7 +1569,22 @@ impl<'a> Extractor<'a> {
             .context("unable to determine output file size")?;
 
         let filename = Path::new(&update.partition_name).with_extension("img");
-        let path: PathBuf = partition_dir.as_ref().join(filename);
+        let path: PathBuf = if self.cmd.fff {
+            let subfolder = match update.partition_name.as_str() {
+                "boot" | "init_boot" | "recovery" | "vbmeta" | "vbmeta_system" | "vbmeta_vendor" | "vendor_boot" => "BOOTLOADER",
+                "abl" | "aop" | "aop_config" | "bluetooth" | "cpucp" | "cpucp_dtb" | "devcfg" | "dsp" | "dtbo" | "engineering_cdt" | "featenabler" | "hyp" | "imagefv" | "keymaster" | "oplus_sec" | "oplusstanvbk" | "qupfw" | "shrm" | "splash" | "tz" | "uefi" | "uefisecapp" | "xbl" | "xbl_config" | "xbl_ramdump" => "CRITICAL",
+                "modem" => "MODEM",
+                "my_bigball" | "my_carrier" | "my_engineering" | "my_heytap" | "my_manifest" | "my_product" | "my_region" | "my_stock" | "odm" | "product" | "system" | "system_dlkm" | "system_ext" | "vendor" | "vendor_dlkm" => "SYSTEM",
+                _ => "EXTRA",
+            };
+
+            let target_dir = partition_dir.as_ref().join(subfolder);
+            fs::create_dir_all(&target_dir)
+                .with_context(|| format!("could not create subfolder directory: {target_dir:?}"))?;
+            target_dir.join(filename)
+        } else {
+            partition_dir.as_ref().join(filename)
+        };
 
         #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
         let mmap = {
@@ -1772,24 +1804,43 @@ impl<'a> Extractor<'a> {
         let os_version = metadata.and_then(|m| m.get("version_name").map(|v| v.as_str()));
         let os_version_safe =
             os_version.map(|v| v.replace(|c| c == '/' || c == '\\' || c == ' ' || c == ':', "_"));
-        let timestamp_folder = if let Some(v) = os_version_safe {
-            format!("extracted_{}_{}", v, now.format("%Y-%m-%d_%H-%M-%S"))
-        } else {
-            format!("extracted_{}", now.format("%Y-%m-%d_%H-%M-%S"))
+
+        let folder_name = match os_version_safe {
+            Some(v) => {
+                if self.cmd.fff {
+                    v
+                } else {
+                    format!("extracted_{}_{}", v, now.format("%Y-%m-%d_%H-%M-%S"))
+                }
+            }
+            None => {
+                if self.cmd.fff {
+                    "firmware".to_string()
+                } else {
+                    format!("extracted_{}", now.format("%Y-%m-%d_%H-%M-%S"))
+                }
+            }
         };
 
         let dir = match &self.cmd.output_dir {
-            Some(output_base) => output_base.join(&timestamp_folder),
+            Some(output_base) => output_base.join(&folder_name),
             None => {
                 let current_dir = env::current_dir().with_context(|| {
                     "Failed to determine current directory. Please specify --output-dir explicitly."
                 })?;
-                current_dir.join(&timestamp_folder)
+                current_dir.join(&folder_name)
             }
         };
         let existed = dir.exists();
         fs::create_dir_all(&dir)
             .with_context(|| format!("could not create output directory: {dir:?}"))?;
+
+        if self.cmd.fff {
+            let extra_dir = dir.join("EXTRA");
+            fs::create_dir_all(&extra_dir)
+                .with_context(|| format!("could not create EXTRA directory: {extra_dir:?}"))?;
+        }
+
         Ok((dir, !existed))
     }
 
@@ -1936,4 +1987,88 @@ impl<'a> Extractor<'a> {
             )
         })
     }
+
+    fn reorganize_extracted_dir(&self, dir: &Path) -> Result<()> {
+        let dir_name = dir.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("extracted");
+
+        let device_name = if dir_name.starts_with("extracted_") {
+            let without_prefix = &dir_name["extracted_".len()..];
+            if without_prefix.len() > 20 {
+                let suffix_start = without_prefix.len() - 20;
+                let potential_suffix = &without_prefix[suffix_start..];
+                let chars: Vec<char> = potential_suffix.chars().collect();
+                if chars[0] == '_' && chars[5] == '-' && chars[8] == '-' && chars[11] == '_' && chars[14] == '-' && chars[17] == '-' {
+                    without_prefix[..suffix_start].to_string()
+                } else {
+                    without_prefix.to_string()
+                }
+            } else {
+                without_prefix.to_string()
+            }
+        } else {
+            dir_name.to_string()
+        };
+
+        let parent_dir = dir.parent().unwrap_or_else(|| Path::new("."));
+        let target_base_dir = parent_dir.join(&device_name);
+
+        println!("Reorganizing extracted directory: {}", dir.display());
+        println!("Target Directory: {}", target_base_dir.display());
+
+        // Pre-create EXTRA folder when reorganizing
+        let extra_dir = target_base_dir.join("EXTRA");
+        fs::create_dir_all(&extra_dir)
+            .with_context(|| format!("could not create EXTRA directory: {extra_dir:?}"))?;
+
+        let mut moved_count = 0;
+
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("img") {
+                let file_name = path.file_name().unwrap().to_string_lossy();
+                let stem = path.file_stem().unwrap().to_string_lossy();
+
+                let subfolder = match stem.as_ref() {
+                    "boot" | "init_boot" | "recovery" | "vbmeta" | "vbmeta_system" | "vbmeta_vendor" | "vendor_boot" => "BOOTLOADER",
+                    "abl" | "aop" | "aop_config" | "bluetooth" | "cpucp" | "cpucp_dtb" | "devcfg" | "dsp" | "dtbo" | "engineering_cdt" | "featenabler" | "hyp" | "imagefv" | "keymaster" | "oplus_sec" | "oplusstanvbk" | "qupfw" | "shrm" | "splash" | "tz" | "uefi" | "uefisecapp" | "xbl" | "xbl_config" | "xbl_ramdump" => "CRITICAL",
+                    "modem" => "MODEM",
+                    "my_bigball" | "my_carrier" | "my_engineering" | "my_heytap" | "my_manifest" | "my_product" | "my_region" | "my_stock" | "odm" | "product" | "system" | "system_dlkm" | "system_ext" | "vendor" | "vendor_dlkm" => "SYSTEM",
+                    _ => "EXTRA",
+                };
+
+                let target_dir = target_base_dir.join(subfolder);
+                fs::create_dir_all(&target_dir)?;
+                let target_path = target_dir.join(&*file_name);
+                fs::copy(&path, &target_path)?;
+                println!("  Copied: {} -> {}/{}", file_name, device_name, subfolder);
+                moved_count += 1;
+            }
+        }
+
+        if moved_count > 0 {
+            println!("\nSuccessfully reorganized {} partition images!", moved_count);
+            if ask_yes_no(&format!("\nDelete original directory? [y/N]: ")) {
+                if let Err(e) = std::fs::remove_dir_all(dir) {
+                    println!("  ⚠️ Failed to delete original directory: {}", e);
+                } else {
+                    println!("  Removed original directory: {}", dir.display());
+                }
+            }
+        } else {
+            println!("\nNo .img files found at the root of the directory to reorganize.");
+        }
+
+        Ok(())
+    }
+}
+
+fn ask_yes_no(prompt: &str) -> bool {
+    print!("{}", prompt);
+    let _ = std::io::stdout().flush();
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).ok();
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }

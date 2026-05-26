@@ -246,6 +246,7 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
         no_open: true,
         positional_payload: Some(path.to_path_buf()),
         quiet: true,
+        fff: false,
     };
 
     let extractor = Extractor { cmd: &cmd };
