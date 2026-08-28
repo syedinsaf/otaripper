@@ -1185,6 +1185,15 @@ impl<'a> Extractor<'a> {
                 }
                 Ok(())
             }
+            Type::ReplaceZstd => {
+                let data = self.extract_data(op, payload, pb, total_dst_size)?;
+                let mut decoder = zstd::stream::read::Decoder::new(&*data)?;
+                self.run_op_replace(&mut decoder, &mut dst_extents, block_size, simd)?;
+                if matches!(payload.data, crate::payload::PayloadData::Local(_)) {
+                    pb.inc(total_dst_size as u64);
+                }
+                Ok(())
+            }
             Type::Zero | Type::Discard => {
                 // the OS kernel guarantees new file sectors are strictly zeroed.
                 // we safely bypass user-space filling completely to save disk I/O

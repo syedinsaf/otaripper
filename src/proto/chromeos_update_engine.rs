@@ -144,6 +144,10 @@ pub mod install_operation {
         /// On minor version 9 or newer, these operations are supported:
         Lz4diffBsdiff = 12,
         Lz4diffPuffdiff = 13,
+        /// On minor version 10 or newer, these operations are supported:
+        ///
+        /// Replace destination extents w/ attached zstd data.
+        ReplaceZstd = 14,
     }
     impl Type {
         /// String value of the enum field names used in the ProtoBuf definition.
@@ -166,6 +170,7 @@ pub mod install_operation {
                 Self::Zucchini => "ZUCCHINI",
                 Self::Lz4diffBsdiff => "LZ4DIFF_BSDIFF",
                 Self::Lz4diffPuffdiff => "LZ4DIFF_PUFFDIFF",
+                Self::ReplaceZstd => "REPLACE_ZSTD",
             }
         }
         /// Creates an enum from field names used in the ProtoBuf definition.
@@ -185,6 +190,7 @@ pub mod install_operation {
                 "ZUCCHINI" => Some(Self::Zucchini),
                 "LZ4DIFF_BSDIFF" => Some(Self::Lz4diffBsdiff),
                 "LZ4DIFF_PUFFDIFF" => Some(Self::Lz4diffPuffdiff),
+                "REPLACE_ZSTD" => Some(Self::ReplaceZstd),
                 _ => None,
             }
         }
