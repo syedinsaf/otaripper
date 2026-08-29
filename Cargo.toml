@@ -42,6 +42,7 @@ zip = { version = "8.6.0", default-features = false, features = [
   "bzip2",
   "zstd",
 ] }
+zstd = "0.13.3"
 libc = "0.2.186"
 
 # Compatibility: Static liblzma only on musl to avoid glibc x86-64-v4 issues

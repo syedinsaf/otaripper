@@ -1203,6 +1203,7 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "zip",
+ "zstd",
 ]
 
 [[package]]
