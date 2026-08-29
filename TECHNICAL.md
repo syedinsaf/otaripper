@@ -2,8 +2,8 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v3.3.0 Note:**
-> This release introduces local and remote EDL firmware ZIP scanning, recursive directory ARB scanning, smart `version_info.txt` JSON metadata parsing, CPU SIMD detection caching via `LazyLock`, MSRV toolchain bump to `1.96.0`, and in-memory ZIP entry performance optimizations to prevent network latency.
+> **v3.4.0 Note:**
+> This release introduces Zstandard (`zstd`) payload compression support (`REPLACE_ZSTD` / minor version 10 update engine format), streaming `zstd::stream::read::Decoder` decompression into zero-copy / SIMD memory maps, contextual error handling, local and remote EDL firmware ZIP scanning, recursive directory ARB scanning, smart `version_info.txt` JSON metadata parsing, CPU SIMD detection caching via `LazyLock`, MSRV toolchain bump to `1.96.0`, and in-memory ZIP entry performance optimizations to prevent network latency.
 
 ---
 
@@ -126,7 +126,7 @@ otaripper:
 otaripper implements a strict fast path for the most common case:
 **operations that target exactly one contiguous destination extent**.
 
-When reading or decompressing (e.g., bzip2, xz) into a single extent, the data is pushed **directly into the memory-mapped file**, skipping intermediary buffering altogether.
+When reading or decompressing (e.g., bzip2, xz, zstd) into a single extent, the data is pushed **directly into the memory-mapped file**, skipping intermediary buffering altogether.
 
 This single-extent zero-copy path eliminates:
 * Redundant buffering and copying round-trips
@@ -384,7 +384,7 @@ No partial or ambiguous state is ever left behind.
 ### Common Bottlenecks
 
 1. Storage I/O (most common)
-2. Decompression (bzip2/xz)
+2. Decompression (bzip2/xz/zstd)
 3. CPU (least common)
 
 ### Optimization Strategies

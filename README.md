@@ -64,11 +64,12 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-| Feature | otaripper v3.3 | payload-dumper-go | payload_dumper (Python) |
+| Feature | otaripper v3.4 | payload-dumper-go | payload_dumper (Python) |
 | :--- | :---: | :---: | :---: |
 | **Output verification** | ✅ SHA-256 | ❌ | ❌ |
 | **Remote HTTP Streaming** | ✅ (Parallel) | ❌ | ❌ |
 | **Network Error Recovery** | ✅ (Auto-resume) | ❌ | ❌ |
+| **Zstd Compressed Payloads** | ✅ (v10 / Vivo) | ❌ | ❌ |
 | **SIMD optimization** | ✅ AVX-512/AVX2 | ❌ | ❌ |
 | **Qualcomm ARB Analysis** | ✅ | ❌ | ❌ |
 | **Firmware Metadata parsing** | ✅ | ❌ | ❌ |
@@ -92,8 +93,9 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 otaripper automatically detects CPU capabilities and selects the optimal execution path.
 
-Version **3.3.0** introduces local/remote EDL firmware and directory scanning, smart metadata parsing, parallel chunked Remote HTTP Streaming, and massive I/O savings:
+Version **3.4.0** introduces Zstandard (`zstd`) compressed payload support (minor version 10 update engine format used in Vivo, iQOO, and modern OTAs), local/remote EDL firmware & directory scanning, smart metadata parsing, parallel chunked Remote HTTP Streaming, and massive I/O savings:
 
+* **Zstandard (`zstd`) Decompression**: Full support for Android update engine minor version 10 operations (`REPLACE_ZSTD`), enabling fast, streamable extraction of modern zstd-compressed OTAs (e.g. Vivo, iQOO) directly into single-extent zero-copy memory maps or SIMD worker pools.
 * **Parallel HTTP Streaming**: Extract specific partitions directly from a remote URL! otaripper intelligently streams only the required byte-ranges over the network, using multiple parallel 8MB chunked requests to saturate your bandwidth.
 * **Network Resilience**: Built-in automatic retries with exponential backoff and real-time offline detection. Never fail an extraction due to a temporary connection drop again.
 * **Smart Firmware Metadata**: Automatically parses OS Version and Security Patches from the ZIP, printing a beautiful info banner and using the OS version to dynamically name the output extraction folder.
@@ -430,7 +432,7 @@ Testing, bug reports, and performance feedback are welcome.
 Please include:
 
 * OS, CPU, RAM
-* otaripper version 3.3.0
+* otaripper version 3.4.0
 * OTA size and format
 * logs or error messages if available
 

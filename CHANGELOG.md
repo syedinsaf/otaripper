@@ -1,5 +1,22 @@
 # Changelog
 
+## **otaripper v3.4.0** (2026-08-29)
+
+### Zstandard (`zstd`) Compressed Payload Support
+
+This release adds support for **Zstandard (`zstd`) compressed payload operations** matching Android update engine minor version 10 specifications (used in modern Android OTAs such as Vivo, iQOO, and others).
+
+* **Zstandard Payload Decompression (`REPLACE_ZSTD`)**
+  * Added `ReplaceZstd` (operation type `14`) support to protobuf definitions (`chromeos_update_engine.rs`) and extraction engine dispatchers.
+  * Integrated `zstd` streaming decompression (`zstd::stream::read::Decoder`) seamlessly into `Extractor::run_op_replace`.
+  * Fully leverages `otaripper`'s single-extent zero-copy streaming and multi-extent SIMD-accelerated write paths.
+  * Added explicit error context (`.context("failed to initialize zstd decoder")`) to cleanly capture and report corrupted `zstd` headers or bad payload data.
+* **Dependency & Version Updates**
+  * Added `zstd = "0.13.3"` dependency.
+  * Bumped `otaripper` crate version to `3.4.0` in `Cargo.toml`.
+
+---
+
 ## **otaripper v3.3.0** (2026-05-29)
 
 ### Qualcomm EDL Firmware & Directory ARB Scanning
