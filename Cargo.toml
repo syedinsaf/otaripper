@@ -37,12 +37,12 @@ ring = "0.17.14"
 sysinfo = "0.39.3"
 tempfile = "3.27.0"
 liblzma = "0.4.6"
+zstd = "0.13.3"
 zip = { version = "8.6.0", default-features = false, features = [
   "deflate",
   "bzip2",
   "zstd",
 ] }
-zstd = "0.13.3"
 libc = "0.2.186"
 
 # Compatibility: Static liblzma only on musl to avoid glibc x86-64-v4 issues
