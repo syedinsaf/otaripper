@@ -1,5 +1,26 @@
 # Changelog
 
+## **otaripper v3.5.0** (2026-10-01)
+
+### Payload Safety Hardening, Remote Seek Bounds & UX Revamp
+
+This release focuses on **safety hardening for remote payload extraction**, overflow protection, dependencies refresh, and a **completely revamped CLI help interface**.
+
+* **Payload Safety & Remote Bounds Protection**
+  * Added checked arithmetic (`checked_add`) for remote payload data offset calculations to prevent arithmetic overflow on malicious or malformed OTAs.
+  * Hardened `Payload::parse_remote` header bounds, magic bytes, manifest offset bounds, and signature size validation against corrupted remote HTTP streams.
+  * Hardened `CachingHttpReader` remote `Seek` with checked offset bounds preventing negative seek underflows (`i64` underflow protection).
+  * Added automated unit test suite covering payload parsing, HTTP seek bounds, and decompression safety.
+* **Revamped CLI Help & Terminal Aesthetics**
+  * Redesigned `FRIENDLY_HELP` interface with color-coded syntax highlighting, structured section hierarchy (`▸ QUICK START`, `▸ COMMON TASKS`, `▸ USAGE`, etc.), pixel-perfect column alignment, and zero emojis.
+  * Added clean `▸ PROJECT REPO  →  https://github.com/syedinsaf/otaripper` single-line footer and improved terminal margin spacing.
+* **Toolchain & Dependency Updates**
+  * Upgraded MSRV (Minimum Supported Rust Version) to **Rust 1.98.1** for LLVM 19 SIMD optimizations and core language features.
+  * Updated dependencies (`anyhow`, `serde`, `serde_json`, `clap`, `console`, `indicatif`, `memmap2`, `crossbeam-channel`, `liblzma`).
+  * Bumped `otaripper` crate version to `3.5.0` in `Cargo.toml`.
+
+---
+
 ## **otaripper v3.4.0** (2026-08-29)
 
 ### Zstandard (`zstd`) Compressed Payload Support
@@ -14,11 +35,6 @@ This release adds support for **Zstandard (`zstd`) compressed payload operations
 * **Dependency & Version Updates**
   * Added `zstd = "0.13.3"` dependency.
   * Bumped `otaripper` crate version to `3.4.0` in `Cargo.toml`.
-* **Toolchain & Safety Hardening**
-  * Upgraded MSRV (Minimum Supported Rust Version) to **Rust 1.98.1** for LLVM 19 SIMD optimizations, trait-object vtable safety, `first_chunk` array slice chunking, `split_once`, and `is_multiple_of`.
-  * Hardened `CachingHttpReader` remote `Seek` with checked offset bounds preventing negative seek underflows.
-  * Hardened `Payload::parse_remote` header bounds, magic bytes, and signature size validation against corrupted remote HTTP streams.
-  * Added automated unit test suite covering payload parsing, HTTP seek bounds, and zstd decompression decoding.
 
 ---
 

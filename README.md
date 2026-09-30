@@ -64,7 +64,7 @@ Unlike many extraction tools, otaripper **verifies output images by default** an
 
 ## Feature Comparison
 
-| Feature | otaripper v3.4 | payload-dumper-go | payload_dumper (Python) |
+| Feature | otaripper v3.5 | payload-dumper-go | payload_dumper (Python) |
 | :--- | :---: | :---: | :---: |
 | **Output verification** | ✅ SHA-256 | ❌ | ❌ |
 | **Remote HTTP Streaming** | ✅ (Parallel) | ❌ | ❌ |
