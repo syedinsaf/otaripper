@@ -218,7 +218,9 @@ impl<'a> Payload<'a> {
             },
             data: PayloadData::Remote {
                 url,
-                data_offset: payload_base_offset + data_start as u64,
+                data_offset: payload_base_offset
+                    .checked_add(data_start as u64)
+                    .ok_or_else(|| anyhow!("Overflow calculating remote payload data offset."))?,
                 client,
             },
         })
