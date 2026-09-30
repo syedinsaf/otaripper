@@ -1,6 +1,6 @@
 [package]
 name = "otaripper"
-version = "3.4.0"
+version = "3.5.0"
 edition = "2024"
 rust-version = "1.98.1"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
@@ -61,5 +61,5 @@ codegen-units = 1
 strip = true
 debug = false
 panic = "abort"
-overflow-checks = true 
+overflow-checks = true
 incremental = false
