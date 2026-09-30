@@ -141,44 +141,44 @@ const FRIENDLY_HELP: &str = color_print::cstr!(
 <rgb(255,220,0)> ░░░░░░     ░░░░░   ░░░░░░░░ ░░░░░     ░░░░░  ░███░░░   ░███░░░   ░░░░░░  ░░░░░     </>
 <rgb(255,235,0)>                                              ░███      ░███                        </>
 <rgb(255,245,0)>                                              █████     █████                       </>
-<rgb(255,255,0)>                                             ░░░░░     ░░░░░                        </>
-</bold>
-<bold><underline>v{version}</underline></bold>
-{about}
+<rgb(255,255,0)>                                             ░░░░░     ░░░░░                        </></bold>
 
-<bold>QUICK START</bold>
-  • Drag & drop an OTA .zip or payload.bin onto the executable.
-  • Extract from a local file: <cyan>otaripper update.zip</cyan>
-  • Stream directly from URL:  <cyan>otaripper https://example.com/ota.zip</cyan>
+  <bold><bright-cyan>v{version}</bright-cyan></bold> <dim>│</dim> {about}
 
-<bold>COMMON TASKS</bold>
-  <italic>(Tip: You can replace 'update.zip' with an HTTP URL in any command!)</italic>
-  • <bold>List</bold> remote/local partitions:               otaripper -l update.zip
-  • <bold>Extract everything</bold>:                         otaripper update.zip
-  • <bold>Extract specific</bold>:                           otaripper update.zip -p boot,init_boot,vendor_boot
-  • <bold>Disable auto-open folder after extraction: </bold> otaripper update.zip -n
-  • <bold>Scan bootloader for ARB metadata: </bold>          otaripper arbscan xbl_config.img
+<bold><bright-cyan>▸ QUICK START</bright-cyan></bold>
+  <cyan>•</cyan> Drag & drop an OTA <dim>.zip</dim> or <dim>payload.bin</dim> onto the executable.
+  <cyan>•</cyan> Extract from local file:                 <cyan>otaripper</cyan> <bright-white>update.zip</bright-white>
+  <cyan>•</cyan> Stream directly from URL:                <cyan>otaripper</cyan> <bright-white>https://example.com/ota.zip</bright-white>
 
-<bold>CLEANUP</bold>
-    • <bold>Remove extracted folders</bold>:                 otaripper clean
-    • <bold>Clean in specific directory</bold>:              otaripper clean -o /path/to/dir
+<bold><bright-cyan>▸ COMMON TASKS</bright-cyan></bold>
+  <dim><i>(Tip: You can replace 'update.zip' with an HTTP URL in any command!)</i></dim>
+  <cyan>•</cyan> List remote/local partitions:             <cyan>otaripper</cyan> <yellow>-l</yellow> <bright-white>update.zip</bright-white>
+  <cyan>•</cyan> Extract all partitions:                   <cyan>otaripper</cyan> <bright-white>update.zip</bright-white>
+  <cyan>•</cyan> Extract specific partitions:              <cyan>otaripper</cyan> <bright-white>update.zip</bright-white> <yellow>-p</yellow> <bright-white>boot,init_boot,vendor_boot</bright-white>
+  <cyan>•</cyan> Disable auto-open after extraction:       <cyan>otaripper</cyan> <bright-white>update.zip</bright-white> <yellow>-n</yellow>
+  <cyan>•</cyan> Scan bootloader for ARB metadata:         <cyan>otaripper</cyan> <yellow>arbscan</yellow> <bright-white>xbl_config.img</bright-white>
 
-<bold>SAFETY & INTEGRITY</bold>
-  • SHA-256 verification is <green>enabled by default</green>.
-  • Partial files are <red>automatically deleted</red> on failure.
-  • Use <yellow>--strict</yellow> to require manifest hashes and enforce verification.
-  • Skip verification (not recommended): <yellow>--no-verify</yellow>
+<bold><bright-cyan>▸ CLEANUP</bright-cyan></bold>
+  <cyan>•</cyan> Remove extracted folders:                 <cyan>otaripper</cyan> <yellow>clean</yellow>
+  <cyan>•</cyan> Clean in specific directory:              <cyan>otaripper</cyan> <yellow>clean -o</yellow> <bright-white>/path/to/dir</bright-white>
 
-<bold>QUALITY OF LIFE</bold>
-  • Automatically opens extracted folder after success.
-  • Disable opening folder: <yellow>-n</yellow> or <yellow>--no-open</yellow>
+<bold><bright-cyan>▸ SAFETY & INTEGRITY</bright-cyan></bold>
+  <cyan>•</cyan> SHA-256 verification is <green>enabled by default</green>.
+  <cyan>•</cyan> Partial files are <red>automatically deleted</red> on failure.
+  <cyan>•</cyan> Require manifest hashes & strict check:   <yellow>--strict</yellow>
+  <cyan>•</cyan> Skip verification (not recommended):     <yellow>--no-verify</yellow>
 
-{usage-heading}
+<bold><bright-cyan>▸ QUALITY OF LIFE</bright-cyan></bold>
+  <cyan>•</cyan> Automatically opens extracted folder after success.
+  <cyan>•</cyan> Disable opening folder:                   <yellow>-n</yellow> or <yellow>--no-open</yellow>
+
+<bold><bright-cyan>▸ USAGE</bright-cyan></bold>
   {usage}
 
-<bold>OPTIONS</bold>
+<bold><bright-cyan>▸ OPTIONS & COMMANDS</bright-cyan></bold>
 {all-args}
 
-<bold>PROJECT</bold>: <blue>https://github.com/syedinsaf/otaripper</blue>
-{after-help}"
+<bold><bright-cyan>▸ PROJECT REPO</bright-cyan></bold>  <cyan>→</cyan>  <blue><underline>https://github.com/syedinsaf/otaripper</underline></blue>
+{after-help}
+"
 );
