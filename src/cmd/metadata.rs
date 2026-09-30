@@ -31,7 +31,11 @@ pub fn fetch_metadata(path_str: &str) -> Option<HashMap<String, String>> {
         if let Ok(content) = std::fs::read_to_string(path.join("payload_properties.txt")) {
             parse_properties(&content, &mut metadata);
         }
-        return if metadata.is_empty() { None } else { Some(metadata) };
+        return if metadata.is_empty() {
+            None
+        } else {
+            Some(metadata)
+        };
     }
 
     let mut file = File::open(path).ok()?;
@@ -114,10 +118,8 @@ fn parse_properties(content: &str, map: &mut HashMap<String, String>) {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(idx) = line.find('=') {
-            let key = line[..idx].trim().to_string();
-            let value = line[idx + 1..].trim().to_string();
-            map.insert(key, value);
+        if let Some((key, value)) = line.split_once('=') {
+            map.insert(key.trim().to_string(), value.trim().to_string());
         }
     }
 }

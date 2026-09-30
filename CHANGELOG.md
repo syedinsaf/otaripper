@@ -14,6 +14,11 @@ This release adds support for **Zstandard (`zstd`) compressed payload operations
 * **Dependency & Version Updates**
   * Added `zstd = "0.13.3"` dependency.
   * Bumped `otaripper` crate version to `3.4.0` in `Cargo.toml`.
+* **Toolchain & Safety Hardening**
+  * Upgraded MSRV (Minimum Supported Rust Version) to **Rust 1.98.1** for LLVM 19 SIMD optimizations, trait-object vtable safety, `first_chunk` array slice chunking, `split_once`, and `is_multiple_of`.
+  * Hardened `CachingHttpReader` remote `Seek` with checked offset bounds preventing negative seek underflows.
+  * Hardened `Payload::parse_remote` header bounds, magic bytes, and signature size validation against corrupted remote HTTP streams.
+  * Added automated unit test suite covering payload parsing, HTTP seek bounds, and zstd decompression decoding.
 
 ---
 

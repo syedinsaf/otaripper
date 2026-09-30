@@ -310,7 +310,7 @@ and refuses to operate on filesystem roots for safety.
 
 ### Requirements
 
-* **Rust 1.96.0 or newer** (MSRV)
+* **Rust 1.98.1 or newer** (MSRV)
 * Git
 * C compiler (gcc / clang / MSVC) - required by some native dependencies
 

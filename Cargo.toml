@@ -2,7 +2,7 @@
 name = "otaripper"
 version = "3.4.0"
 edition = "2024"
-rust-version = "1.96.0"
+rust-version = "1.98.1"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
 description = "Ultra-fast partition extractor for Android OTA .zip and payload.bin files (Local & HTTP URL Streaming)"
 repository = "https://github.com/syedinsaf/otaripper"
@@ -12,42 +12,42 @@ categories = ["command-line-utilities"]
 readme = "README.md"
 
 [dependencies]
-anyhow = "1.0.102"
+anyhow = "1.0.104"
 bzip2 = "0.6.1"
 reqwest = { version = "0.12.9", default-features = false, features = [
   "blocking",
   "rustls-tls-webpki-roots",
   "hickory-dns",
 ], optional = true }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 chrono = "0.4.45"
-clap = { version = "4.6.6", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive"] }
 color-print = "0.3.7"
-console = { version = "0.16.3", features = ["windows-console-colors"] }
-crossbeam-channel = "0.5.15"
+console = { version = "0.16.6", features = ["windows-console-colors"] }
+crossbeam-channel = "0.5.17"
 ctrlc = "3.5.2"
 hex = "0.4.3"
-indicatif = "0.18.4"
-memmap2 = { version = "0.9.10", features = ["stable_deref_trait"] }
+indicatif = "0.18.6"
+memmap2 = { version = "0.9.11", features = ["stable_deref_trait"] }
 mimalloc = "0.1.52"
 prost = "0.14.4"
 rayon = "1.12.0"
 ring = "0.17.14"
-sysinfo = "0.39.3"
+sysinfo = "0.39.6"
 tempfile = "3.27.0"
-liblzma = "0.4.6"
+liblzma = "0.4.8"
 zstd = "0.14.0"
 zip = { version = "8.6.0", default-features = false, features = [
   "deflate",
   "bzip2",
   "zstd",
 ] }
-libc = "0.2.186"
+libc = "0.2.189"
 
 # Compatibility: Static liblzma only on musl to avoid glibc x86-64-v4 issues
 [target.'cfg(target_env = "musl")'.dependencies]
-liblzma = { version = "0.4.6", features = ["static"] }
+liblzma = { version = "0.4.8", features = ["static"] }
 
 
 [features]
@@ -61,5 +61,5 @@ codegen-units = 1
 strip = true
 debug = false
 panic = "abort"
-overflow-checks = true
+overflow-checks = true 
 incremental = false

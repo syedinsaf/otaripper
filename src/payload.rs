@@ -17,6 +17,7 @@ pub enum PayloadData<'a> {
 }
 
 #[allow(dead_code)]
+#[derive(Debug)]
 pub struct Payload<'a> {
     pub file_format_version: u64,
     pub manifest_size: u64,
@@ -61,9 +62,10 @@ impl<'a> Payload<'a> {
 
         // ---- Version & Size Parsing ----
         let file_format_version = u64::from_be_bytes(
-            bytes[4..12]
-                .try_into()
-                .map_err(|_| anyhow!("Internal Error: Could not read version"))?,
+            *bytes
+                .get(4..)
+                .and_then(|b| b.first_chunk())
+                .ok_or_else(|| anyhow!("Internal Error: Could not read version"))?,
         );
 
         if file_format_version > SUPPORTED_VERSION_MAX {
@@ -73,9 +75,10 @@ impl<'a> Payload<'a> {
         }
 
         let manifest_size = u64::from_be_bytes(
-            bytes[12..20]
-                .try_into()
-                .map_err(|_| anyhow!("Internal Error: Could not read manifest size"))?,
+            *bytes
+                .get(12..)
+                .and_then(|b| b.first_chunk())
+                .ok_or_else(|| anyhow!("Internal Error: Could not read manifest size"))?,
         );
 
         if manifest_size > MAX_MANIFEST_SIZE {
@@ -90,9 +93,10 @@ impl<'a> Payload<'a> {
                 );
             }
             let sig_size = u32::from_be_bytes(
-                bytes[20..24]
-                    .try_into()
-                    .map_err(|_| anyhow!("Internal Error: Could not read signature"))?,
+                *bytes
+                    .get(20..)
+                    .and_then(|b| b.first_chunk())
+                    .ok_or_else(|| anyhow!("Internal Error: Could not read signature"))?,
             );
             if sig_size > MAX_METADATA_SIG_SIZE {
                 bail!("The file signature is invalid or corrupted.");
@@ -141,20 +145,67 @@ impl<'a> Payload<'a> {
         payload_base_offset: u64,
         client: reqwest::blocking::Client,
     ) -> Result<Self> {
-        let file_format_version = u64::from_be_bytes(manifest_buf[4..12].try_into().unwrap());
-        let manifest_size = u64::from_be_bytes(manifest_buf[12..20].try_into().unwrap());
+        if manifest_buf.len() < 20 {
+            bail!("Remote header buffer is too short to be a valid payload.");
+        }
 
-        let (header_size, sig_size) = if file_format_version >= 2 {
-            (
-                24,
-                u32::from_be_bytes(manifest_buf[20..24].try_into().unwrap()) as usize,
-            )
+        let magic = &manifest_buf[0..4];
+        if magic != PAYLOAD_MAGIC {
+            bail!("Remote payload magic mismatch.");
+        }
+
+        let file_format_version = u64::from_be_bytes(
+            *manifest_buf
+                .get(4..)
+                .and_then(|b| b.first_chunk())
+                .ok_or_else(|| anyhow!("Could not read remote payload format version"))?,
+        );
+
+        if file_format_version > SUPPORTED_VERSION_MAX {
+            bail!("Remote update uses an unsupported format version.");
+        }
+
+        let manifest_size = u64::from_be_bytes(
+            *manifest_buf
+                .get(12..)
+                .and_then(|b| b.first_chunk())
+                .ok_or_else(|| anyhow!("Could not read remote manifest size"))?,
+        );
+
+        if manifest_size > MAX_MANIFEST_SIZE {
+            bail!("Remote payload metadata size is corrupted or oversized.");
+        }
+
+        let (header_size, sig_size): (usize, usize) = if file_format_version >= 2 {
+            if manifest_buf.len() < 24 {
+                bail!("Remote header buffer is too short for format version 2.");
+            }
+            let sig_sz = u32::from_be_bytes(
+                *manifest_buf
+                    .get(20..)
+                    .and_then(|b| b.first_chunk())
+                    .ok_or_else(|| anyhow!("Could not read remote signature size"))?,
+            );
+            if sig_sz > MAX_METADATA_SIG_SIZE {
+                bail!("Remote signature size is corrupted.");
+            }
+            (24, sig_sz as usize)
         } else {
             (20, 0)
         };
 
-        let manifest_len = manifest_size as usize;
-        let data_start = header_size + manifest_len + sig_size;
+        let manifest_len: usize = manifest_size
+            .try_into()
+            .context("Remote manifest size exceeds memory limits.")?;
+
+        let data_start = header_size
+            .checked_add(manifest_len)
+            .and_then(|sum| sum.checked_add(sig_size))
+            .ok_or_else(|| anyhow!("Memory overflow in remote payload parsing."))?;
+
+        if manifest_buf.len() < data_start {
+            bail!("Remote manifest buffer is incomplete.");
+        }
 
         Ok(Self {
             file_format_version,
@@ -167,9 +218,58 @@ impl<'a> Payload<'a> {
             },
             data: PayloadData::Remote {
                 url,
-                data_offset: payload_base_offset + data_start as u64,
+                data_offset: payload_base_offset
+                    .checked_add(data_start as u64)
+                    .ok_or_else(|| anyhow!("Overflow calculating remote payload data offset."))?,
                 client,
             },
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_payload_parse_short_input() {
+        let short_bytes = [0u8; 10];
+        assert!(Payload::parse(&short_bytes).is_err());
+    }
+
+    #[test]
+    fn test_payload_parse_invalid_magic() {
+        let mut exe_bytes = [0u8; 30];
+        exe_bytes[0..2].copy_from_slice(b"MZ");
+        let err = Payload::parse(&exe_bytes).unwrap_err().to_string();
+        assert!(err.contains("WINDOWS .EXE"));
+
+        let mut zip_bytes = [0u8; 30];
+        zip_bytes[0..4].copy_from_slice(b"PK\x03\x04");
+        let err = Payload::parse(&zip_bytes).unwrap_err().to_string();
+        assert!(err.contains("ZIP archive"));
+    }
+
+    #[test]
+    fn test_payload_parse_valid_header() {
+        let mut buf = [0u8; 100];
+        buf[0..4].copy_from_slice(b"CrAU");
+        buf[4..12].copy_from_slice(&2u64.to_be_bytes());
+        buf[12..20].copy_from_slice(&10u64.to_be_bytes());
+        buf[20..24].copy_from_slice(&0u32.to_be_bytes());
+
+        let payload = Payload::parse(&buf).unwrap();
+        assert_eq!(payload.file_format_version, 2);
+        assert_eq!(payload.manifest_size, 10);
+        assert_eq!(payload.manifest.len(), 10);
+    }
+
+    #[test]
+    fn test_payload_parse_unsupported_version() {
+        let mut buf = [0u8; 100];
+        buf[0..4].copy_from_slice(b"CrAU");
+        buf[4..12].copy_from_slice(&99u64.to_be_bytes());
+
+        assert!(Payload::parse(&buf).is_err());
     }
 }

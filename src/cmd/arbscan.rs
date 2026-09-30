@@ -81,24 +81,21 @@ impl From<serde_json::Error> for ArbError {
 
 // helpers
 fn read_le16(buf: &[u8], off: usize) -> Option<u16> {
-    buf.get(off..off + 2)?
-        .try_into()
-        .ok()
-        .map(u16::from_le_bytes)
+    buf.get(off..)?
+        .first_chunk()
+        .map(|b| u16::from_le_bytes(*b))
 }
 
 fn read_le32(buf: &[u8], off: usize) -> Option<u32> {
-    buf.get(off..off + 4)?
-        .try_into()
-        .ok()
-        .map(u32::from_le_bytes)
+    buf.get(off..)?
+        .first_chunk()
+        .map(|b| u32::from_le_bytes(*b))
 }
 
 fn read_le64(buf: &[u8], off: usize) -> Option<u64> {
-    buf.get(off..off + 8)?
-        .try_into()
-        .ok()
-        .map(u64::from_le_bytes)
+    buf.get(off..)?
+        .first_chunk()
+        .map(|b| u64::from_le_bytes(*b))
 }
 
 fn sane_version(v: u32) -> bool {
@@ -169,13 +166,12 @@ fn json_filename(device_model: &str, update_label: &str, arb: u32, input: &Path)
 
         // Strip extension (like .zip) if present, but only if it's a URL (local file_stem already stripped it)
         let mut extracted_stem = base_name;
-        if is_url {
-            if let Some(s) = Path::new(extracted_stem)
+        if is_url
+            && let Some(s) = Path::new(extracted_stem)
                 .file_stem()
                 .and_then(|s| s.to_str())
-            {
-                extracted_stem = s;
-            }
+        {
+            extracted_stem = s;
         }
         stem.push_str(extracted_stem);
     }
@@ -217,7 +213,7 @@ fn find_hash_header(seg: &[u8]) -> Option<usize> {
             continue;
         }
         // Support both SHA256 (multiple of 32) and SHA384 (multiple of 48) hash tables by checking for a multiple of 16
-        if hash_tbl_sz == 0 || (hash_tbl_sz & 0xF) != 0 {
+        if hash_tbl_sz == 0 || !hash_tbl_sz.is_multiple_of(16) {
             continue;
         }
         if off + HASH_HDR_SIZE + common_sz + qti_sz + oem_sz > seg.len() {
@@ -252,13 +248,13 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
                 .tcp_keepalive(std::time::Duration::from_secs(5))
                 .user_agent(concat!("otaripper/", env!("CARGO_PKG_VERSION")))
                 .build()?;
-            
+
             let spinner = indicatif::ProgressBar::new_spinner();
             spinner.set_style(
                 indicatif::ProgressStyle::with_template("{spinner:.cyan.bold} {msg}").unwrap(),
             );
             spinner.enable_steady_tick(std::time::Duration::from_millis(69));
-            
+
             let mut reader = crate::remote::CachingHttpReader::new(client, path_str, &spinner)?;
             spinner.finish_and_clear();
 
@@ -416,8 +412,8 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
                 }
             }
 
-            let xbl_path =
-                xbl_path.ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
+            let xbl_path = xbl_path
+                .ok_or_else(|| anyhow::anyhow!("xbl_config.img was not found in the payload!"))?;
 
             return match do_run(no_json, &xbl_path, path, metadata) {
                 Ok(()) => Ok(()),
@@ -426,7 +422,7 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
         } else {
             // Treat as EDL firmware or other zip firmware
             println!("[arbscan] EDL firmware zip detected. Scanning for bootloader image...");
-            
+
             // Look for candidates
             let mut candidate_name = None;
             let mut best_priority = usize::MAX;
@@ -435,7 +431,9 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
                 let name_lower = name.to_lowercase();
 
                 let matches_candidate = |suffix: &str| -> bool {
-                    name_lower == suffix || name_lower.ends_with(&format!("/{}", suffix)) || name_lower.ends_with(&format!("\\{}", suffix))
+                    name_lower == suffix
+                        || name_lower.ends_with(&format!("/{}", suffix))
+                        || name_lower.ends_with(&format!("\\{}", suffix))
                 };
 
                 let priority = if matches_candidate("xbl_config.img") {
@@ -460,10 +458,13 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
                 anyhow::anyhow!("No valid bootloader candidate (xbl_config.img/elf, xbl.img/elf) found in the zip archive!")
             })?;
 
-            println!("[arbscan] Found candidate: {}. Extracting temporarily...", candidate_name);
+            println!(
+                "[arbscan] Found candidate: {}. Extracting temporarily...",
+                candidate_name
+            );
             let temp_dir = tempfile::tempdir()?;
             let temp_file_path = temp_dir.path().join("extracted_bootloader.img");
-            
+
             {
                 let mut temp_file = File::create(&temp_file_path)?;
                 let mut entry = archive.by_name(&candidate_name)?;
@@ -477,7 +478,9 @@ pub fn run(no_json: bool, path: &Path) -> anyhow::Result<()> {
         }
     }
 
-    anyhow::bail!("Unsupported file format or invalid magic bytes. Only ELF images, OTA zip files, or EDL/firmware zip packages/directories are supported.");
+    anyhow::bail!(
+        "Unsupported file format or invalid magic bytes. Only ELF images, OTA zip files, or EDL/firmware zip packages/directories are supported."
+    );
 }
 
 fn do_run(
@@ -623,7 +626,8 @@ fn do_run(
                 update_label = ver.clone();
                 fully_auto = true;
             }
-            if let Some(dev) = meta.get("post-device")
+            if let Some(dev) = meta
+                .get("post-device")
                 .or(meta.get("pre-device"))
                 .or(meta.get("product_name"))
                 .or(meta.get("product_model"))
