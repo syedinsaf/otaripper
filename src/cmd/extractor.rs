@@ -244,45 +244,45 @@ impl<'a> Extractor<'a> {
         let payload_path_str = payload_path.to_str().context("Path is not valid UTF-8")?;
 
         let metadata = crate::cmd::metadata::fetch_metadata(payload_path_str);
-        if let Some(ref meta) = metadata {
-            if !self.cmd.quiet {
-                println!("Firmware Information");
-                println!("────────────────────");
+        if let Some(ref meta) = metadata
+            && !self.cmd.quiet
+        {
+            println!("Firmware Information");
+            println!("────────────────────");
 
-                // 1. Device Model
-                if let Some(model) = meta.get("product_name").or(meta.get("pre-device")) {
-                    println!("{:<26} : {}", "Product Model", model);
-                }
+            // 1. Device Model
+            if let Some(model) = meta.get("product_name").or(meta.get("pre-device")) {
+                println!("{:<26} : {}", "Product Model", model);
+            }
 
-                // 2. Android Version
-                if let Some(android_ver) = meta.get("android_version") {
-                    println!("{:<26} : {}", "Android Version", android_ver);
-                }
+            // 2. Android Version
+            if let Some(android_ver) = meta.get("android_version") {
+                println!("{:<26} : {}", "Android Version", android_ver);
+            }
 
-                // 3. Build/OS Version
-                if let Some(build_ver) = meta.get("version_name").or(meta.get("post-build")) {
-                    println!("{:<26} : {}", "Build Version", build_ver);
-                }
+            // 3. Build/OS Version
+            if let Some(build_ver) = meta.get("version_name").or(meta.get("post-build")) {
+                println!("{:<26} : {}", "Build Version", build_ver);
+            }
 
-                // 4. ColorOS/OxygenOS Version
-                if let Some(rom_ver) = meta.get("oplus_rom_version").or(meta.get("os_version")) {
-                    // Avoid duplicating version_name if os_version happens to equal version_name
-                    if let Some(version_name) = meta.get("version_name") {
-                        if rom_ver != version_name {
-                            println!("{:<26} : {}", "OxygenOS/ColorOS Version", rom_ver);
-                        }
-                    } else {
+            // 4. ColorOS/OxygenOS Version
+            if let Some(rom_ver) = meta.get("oplus_rom_version").or(meta.get("os_version")) {
+                // Avoid duplicating version_name if os_version happens to equal version_name
+                if let Some(version_name) = meta.get("version_name") {
+                    if rom_ver != version_name {
                         println!("{:<26} : {}", "OxygenOS/ColorOS Version", rom_ver);
                     }
+                } else {
+                    println!("{:<26} : {}", "OxygenOS/ColorOS Version", rom_ver);
                 }
-
-                // 5. Security Patch
-                if let Some(patch) = meta.get("security_patch") {
-                    println!("{:<26} : {}", "Security Patch", patch);
-                }
-
-                println!();
             }
+
+            // 5. Security Patch
+            if let Some(patch) = meta.get("security_patch") {
+                println!("{:<26} : {}", "Security Patch", patch);
+            }
+
+            println!();
         }
 
         let payload_source = self.open_payload_file(payload_path_str)?;
@@ -1156,7 +1156,7 @@ impl<'a> Extractor<'a> {
             Type::Replace => {
                 let data = self.extract_data(op, payload, pb, total_dst_size)?;
                 self.run_op_replace_slice(
-                    &*data,
+                    &data,
                     &mut dst_extents,
                     block_size,
                     total_dst_size,
@@ -1398,8 +1398,8 @@ impl<'a> Extractor<'a> {
                 let mut header = [0u8; 24];
                 reader.read_exact(&mut header)?;
 
-                let file_format_version = u64::from_be_bytes(header[4..12].try_into().unwrap());
-                let manifest_size = u64::from_be_bytes(header[12..20].try_into().unwrap());
+                let file_format_version = u64::from_be_bytes(*header[4..12].first_chunk().unwrap());
+                let manifest_size = u64::from_be_bytes(*header[12..20].first_chunk().unwrap());
 
                 // prevent exabyte OOM panics from malicious servers sending garbage data
                 // max manifest size is 256MB, anything larger is mathematically a rogue server
@@ -1412,7 +1412,7 @@ impl<'a> Extractor<'a> {
                 let (header_size, sig_size) = if file_format_version >= 2 {
                     (
                         24,
-                        u32::from_be_bytes(header[20..24].try_into().unwrap()) as usize,
+                        u32::from_be_bytes(*header[20..24].first_chunk().unwrap()) as usize,
                     )
                 } else {
                     (20, 0)
@@ -1662,10 +1662,10 @@ impl<'a> Extractor<'a> {
             }
         };
 
-        if !self.cmd.no_verify {
-            if let Some(hash) = &op.data_sha256_hash {
-                self.verify_sha256(&*data, hash).context("hash mismatch")?;
-            }
+        if !self.cmd.no_verify
+            && let Some(hash) = &op.data_sha256_hash
+        {
+            self.verify_sha256(&data, hash).context("hash mismatch")?;
         }
         Ok(data)
     }
@@ -1780,8 +1780,7 @@ impl<'a> Extractor<'a> {
     ) -> Result<(PathBuf, bool)> {
         let now = Local::now();
         let os_version = metadata.and_then(|m| m.get("version_name").map(|v| v.as_str()));
-        let os_version_safe =
-            os_version.map(|v| v.replace(|c| c == '/' || c == '\\' || c == ' ' || c == ':', "_"));
+        let os_version_safe = os_version.map(|v| v.replace(['/', '\\', ' ', ':'], "_"));
         let timestamp_folder = if let Some(v) = os_version_safe {
             format!("extracted_{}_{}", v, now.format("%Y-%m-%d_%H-%M-%S"))
         } else {
@@ -1945,5 +1944,36 @@ impl<'a> Extractor<'a> {
                     | Type::Zucchini)
             )
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_zstd_decompression_valid() {
+        let original_data = b"Hello, Android OTA zstd payload test!";
+        let compressed = zstd::encode_all(&original_data[..], 3).unwrap();
+
+        let mut decoder = zstd::stream::read::Decoder::new(&compressed[..])
+            .context("failed to initialize zstd decoder")
+            .unwrap();
+
+        let mut decompressed = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decompressed).unwrap();
+
+        assert_eq!(decompressed, original_data);
+    }
+
+    #[test]
+    fn test_zstd_decompression_corrupt() {
+        let corrupt_data = [0xFF, 0xFE, 0xFD, 0xFC, 0xFB];
+        let mut decoder = zstd::stream::read::Decoder::new(&corrupt_data[..])
+            .context("failed to initialize zstd decoder")
+            .unwrap();
+
+        let mut decompressed = Vec::new();
+        assert!(std::io::Read::read_to_end(&mut decoder, &mut decompressed).is_err());
     }
 }

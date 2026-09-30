@@ -228,7 +228,7 @@ impl CachingHttpReader {
             .headers()
             .get("Content-Range")
             .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split('/').last())
+            .and_then(|v| v.split('/').next_back())
             .and_then(|v| v.parse::<u64>().ok())
             .or_else(|| {
                 resp.headers()
@@ -410,7 +410,7 @@ impl Read for CachingHttpReader {
             .get(&self.url)
             .header("Range", format!("bytes={}-{}", self.pos, end))
             .send()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+            .map_err(io::Error::other)?;
 
         let n = resp.read(buf)?;
         NETWORK_BYTES_READ.fetch_add(n, Ordering::Relaxed);
@@ -422,11 +422,51 @@ impl Read for CachingHttpReader {
 
 impl Seek for CachingHttpReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        self.pos = match pos {
-            SeekFrom::Start(p) => p,
-            SeekFrom::End(p) => (self.length as i64 + p) as u64,
-            SeekFrom::Current(p) => (self.pos as i64 + p) as u64,
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p as i128,
+            SeekFrom::End(p) => self.length as i128 + p as i128,
+            SeekFrom::Current(p) => self.pos as i128 + p as i128,
         };
+
+        if new_pos < 0 || new_pos > u64::MAX as i128 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid seek position (offset out of bounds or negative)",
+            ));
+        }
+
+        self.pos = new_pos as u64;
         Ok(self.pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_caching_http_reader_seek() {
+        let mut reader = CachingHttpReader {
+            client: reqwest::blocking::Client::new(),
+            url: "http://localhost/test.zip".to_string(),
+            length: 1000,
+            pos: 100,
+            head_buf: vec![],
+            tail_buf: vec![],
+            tail_start: 1000,
+        };
+
+        // SeekFrom::Start
+        assert_eq!(reader.seek(SeekFrom::Start(500)).unwrap(), 500);
+
+        // SeekFrom::Current
+        assert_eq!(reader.seek(SeekFrom::Current(50)).unwrap(), 550);
+
+        // SeekFrom::End
+        assert_eq!(reader.seek(SeekFrom::End(-100)).unwrap(), 900);
+
+        // Invalid negative seek
+        assert!(reader.seek(SeekFrom::End(-2000)).is_err());
+        assert!(reader.seek(SeekFrom::Current(-5000)).is_err());
     }
 }

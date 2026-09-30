@@ -11,7 +11,7 @@ use std::path::PathBuf;
 #[derive(Debug, clap::Subcommand)]
 pub enum SubCmd {
     /// Remove extracted_* folders
-    #[clap(aliases = &["c"])]
+    #[clap(alias = "c")]
     Clean {
         /// Clean extracted_* folders inside this directory
         #[clap(
@@ -24,7 +24,7 @@ pub enum SubCmd {
     },
     /// Extract OEM Anti-Rollback (ARB) metadata from Qualcomm bootloader images
     #[clap(
-        aliases = &["arb"],
+        alias = "arb",
         override_usage = "otaripper arbscan [OPTIONS] <PATH>\n\n  Note: The 'arb' subcommand only supports the '-n' / '--no-json' flag. Global extraction flags like -l, --strict, or --sanity are not applicable here."
     )]
     Arbscan {

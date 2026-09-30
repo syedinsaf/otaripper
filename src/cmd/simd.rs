@@ -85,7 +85,7 @@ impl<'a, 'b> io::Write for ExtentsWriter<'a, 'b> {
 }
 
 // Runtime CPU feature detection for SIMD acceleration.
-// Cached via OnceLock; enable debug output with OTARIPPER_DEBUG_CPU=1.
+// Cached via LazyLock; enable debug output with OTARIPPER_DEBUG_CPU=1.
 #[cfg(target_arch = "x86_64")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CpuSimd {

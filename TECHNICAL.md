@@ -3,7 +3,7 @@
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
 > **v3.4.0 Note:**
-> This release introduces Zstandard (`zstd`) payload compression support (`REPLACE_ZSTD` / minor version 10 update engine format), streaming `zstd::stream::read::Decoder` decompression into zero-copy / SIMD memory maps, contextual error handling, local and remote EDL firmware ZIP scanning, recursive directory ARB scanning, smart `version_info.txt` JSON metadata parsing, CPU SIMD detection caching via `LazyLock`, MSRV toolchain bump to `1.96.0`, and in-memory ZIP entry performance optimizations to prevent network latency.
+> This release introduces Zstandard (`zstd`) payload compression support (`REPLACE_ZSTD` / minor version 10 update engine format), streaming `zstd::stream::read::Decoder` decompression into zero-copy / SIMD memory maps, contextual error handling, local and remote EDL firmware ZIP scanning, recursive directory ARB scanning, smart `version_info.txt` JSON metadata parsing, CPU SIMD detection caching via `LazyLock`, MSRV toolchain bump to `1.98.1`, hardened remote seek offset bounds, and unit testing validation.
 
 ---
 
