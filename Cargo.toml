@@ -38,7 +38,7 @@ sysinfo = "0.39.6"
 tempfile = "3.27.0"
 liblzma = "0.4.8"
 zstd = "0.14.0"
-zip = { version = "8.6.0", default-features = false, features = [
+zip = { version = "9.0.0", default-features = false, features = [
   "deflate",
   "bzip2",
   "zstd",
