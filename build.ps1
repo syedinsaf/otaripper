@@ -57,8 +57,7 @@ else {
     $currentRust = (rustc --version).Split()[1]
 
     function Format-Version($v) {
-        $parts = $v.Split('.')
-        return "{0:D3}.{1:D3}.{2:D3}" -f $parts[0], $parts[1], $parts[2]
+        return [version]($v -replace "-.*$", "")
     }
 
     if ((Format-Version $currentRust) -lt (Format-Version $requiredRust)) {
