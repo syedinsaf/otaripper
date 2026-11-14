@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $REPO = "syedinsaf/otaripper"
 $ZIP_URL = "https://github.com/$REPO/archive/refs/heads/main.zip"
 
-$BASE_DIR = $PSScriptRoot
+$BASE_DIR = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD.Path }
 $WORKDIR = Join-Path $BASE_DIR "otaripper-native-build"
 $OUTDIR = Join-Path $BASE_DIR "otaripper-native"
 
@@ -16,8 +16,14 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     if ($yn -match '^[Yy]') {
         Write-Host "Installing Rust (rustup)..."
 
-        Invoke-WebRequest https://win.rustup.rs -OutFile "rustup-init.exe"
-        Start-Process -FilePath ".\rustup-init.exe" -ArgumentList "-y" -Wait
+        $rustupInstaller = Join-Path $BASE_DIR "rustup-init.exe"
+        try {
+            Invoke-WebRequest https://win.rustup.rs -OutFile $rustupInstaller
+            Start-Process -FilePath $rustupInstaller -ArgumentList "-y" -Wait
+        }
+        finally {
+            Remove-Item -Force -ErrorAction SilentlyContinue $rustupInstaller
+        }
 
         $env:PATH = "$env:USERPROFILE\.cargo\bin;$env:PATH"
         rustup update stable
@@ -53,15 +59,10 @@ if (-not $msrvLine) {
     Write-Host "WARNING: No rust-version field found in Cargo.toml."
 }
 else {
-    $requiredRust = ($msrvLine -split '=')[1].Trim().Trim('"')
+    $requiredRust = ($msrvLine -split '=')[1].Trim().Trim('"').Trim("'")
     $currentRust = (rustc --version).Split()[1]
 
-    function Format-Version($v) {
-        $parts = $v.Split('.')
-        return "{0:D3}.{1:D3}.{2:D3}" -f $parts[0], $parts[1], $parts[2]
-    }
-
-    if ((Format-Version $currentRust) -lt (Format-Version $requiredRust)) {
+    if ([version]$currentRust -lt [version]$requiredRust) {
         Write-Host ""
         Write-Host "ERROR: Rust version mismatch"
         Write-Host "  Installed Rust : $currentRust"
@@ -83,15 +84,19 @@ Write-Host "Building Full version (release, CPU=native)..."
 $oldRustFlags = $env:RUSTFLAGS
 $env:RUSTFLAGS = "-C target-cpu=native"
 
-cargo build --release --locked
+try {
+    cargo build --release --locked
+}
+finally {
+    $env:RUSTFLAGS = $oldRustFlags
+}
+
 $BIN = "target\release\otaripper.exe"
 if (-not (Test-Path $BIN)) {
     Write-Host "ERROR: Full build failed."
     exit 1
 }
 Copy-Item $BIN "$OUTDIR\otaripper.exe" -Force
-
-$env:RUSTFLAGS = $oldRustFlags
 
 # Cleanup
 Write-Host "Finalizing..."
