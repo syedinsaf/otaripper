@@ -62,7 +62,11 @@ else {
     $requiredRust = ($msrvLine -split '=')[1].Trim().Trim('"').Trim("'")
     $currentRust = (rustc --version).Split()[1]
 
-    if ([version]$currentRust -lt [version]$requiredRust) {
+    # Strip any pre-release suffix (e.g. -nightly, -beta.7) for [version] compatibility
+    $currentRustClean = ($currentRust -split '-')[0]
+    $requiredRustClean = ($requiredRust -split '-')[0]
+
+    if ([version]$currentRustClean -lt [version]$requiredRustClean) {
         Write-Host ""
         Write-Host "ERROR: Rust version mismatch"
         Write-Host "  Installed Rust : $currentRust"

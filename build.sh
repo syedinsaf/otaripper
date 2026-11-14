@@ -48,11 +48,12 @@ cd otaripper-*
 
 # MSRV check
 if [ -f "Cargo.toml" ]; then
-  REQUIRED_RUST=$(grep '^rust-version' Cargo.toml | head -n1 | cut -d'=' -f2 | tr -d ' "''')
+  REQUIRED_RUST=$(grep '^rust-version' Cargo.toml | head -n1 | cut -d'=' -f2 | tr -d ' "''' | cut -d'-' -f1)
   if [ -n "$REQUIRED_RUST" ] && command -v rustc >/dev/null 2>&1; then
     CURRENT_RUST=$(rustc --version | awk '{print $2}')
-    LOWEST_VERSION=$(printf '%s\n%s\n' "$REQUIRED_RUST" "$CURRENT_RUST" | sort -V | head -n1)
-    if [ "$LOWEST_VERSION" != "$REQUIRED_RUST" ] && [ "$CURRENT_RUST" != "$REQUIRED_RUST" ]; then
+    CURRENT_RUST_CLEAN=$(echo "$CURRENT_RUST" | cut -d'-' -f1)
+    LOWEST_VERSION=$(printf '%s\n%s\n' "$REQUIRED_RUST" "$CURRENT_RUST_CLEAN" | sort -V | head -n1)
+    if [ "$LOWEST_VERSION" != "$REQUIRED_RUST" ] && [ "$CURRENT_RUST_CLEAN" != "$REQUIRED_RUST" ]; then
       echo "❌ Rust version mismatch"
       echo "  Installed Rust : $CURRENT_RUST"
       echo "  Required Rust  : $REQUIRED_RUST"
