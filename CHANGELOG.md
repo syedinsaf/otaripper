@@ -1,5 +1,32 @@
 # Changelog
 
+## **otaripper v3.6.0** (2026-11-14)
+
+### SIMD Alignment Protection, Constrained Environment Resilience, & Supply-Chain Hardening
+
+This release focuses on **hardware alignment safety for streaming SIMD**, resilient RAM querying for containerized environments, Cargo 1.100 supply-chain security, and overhauled native build scripts.
+
+* **SIMD Hardware Fault Protection**
+  * Fixed hardware General Protection Faults (`SIGSEGV` / crash) caused by unaligned non-temporal streaming writes (`vmovntdq` on AVX2 / AVX-512) when writing decompressed extents at arbitrary byte offsets.
+  * Introduced unaligned head handling in `ExtentsWriter` to safely copy leading bytes up to alignment boundaries before dispatching streaming vector loops.
+  * Added constant `NT_THRESHOLD` (1 MiB) and exhaustive unit tests verifying all 64 possible misalignment permutations across SSE2, AVX2, and AVX-512.
+* **Resilient RAM Querying & Container Safety**
+  * Hardened payload RAM heuristic in `Extractor::open_payload_file` for `sysinfo 0.40.3`.
+  * If system memory cannot be queried (e.g. inside minimal Docker containers or chroots lacking `/proc`), safely falls back to disk extraction (`available_ram = 0`) instead of failing execution.
+  * Eliminated redundant full-memory/swap refresh calls.
+* **Supply-Chain Security & Toolchain Modernization**
+  * Upgraded MSRV to **Rust 1.100**.
+  * Added Cargo 1.100 registry dependency cooldown (`global-min-publish-age = "3 days"`) in `.cargo/config.toml` to protect against zero-day malicious crate releases.
+  * Added native unused dependency lint tracking (`[lints.cargo] unused_dependencies = "warn"`).
+  * Enforced `--locked` reproducible builds in build scripts.
+* **Overhauled Native Build Scripts (`build.sh` & `build.ps1`)**
+  * `build.sh`: Fixed output directory to build within the script directory instead of hardcoded `$HOME/Documents`, added automated MSRV checking against `Cargo.toml`, and ensured `chmod +x` executable bits.
+  * `build.ps1`: Fixed broken version comparison logic by using native `[version]`, wrapped `rustup-init.exe` in `try/finally` cleanup, and protected `$env:RUSTFLAGS` environment variable restoration.
+* **Dependency Updates**
+  * Bumped `sysinfo` to 0.40.3, `zip` to 9.5.1, `prost` to 0.14.6, and `zstd` to 0.14.4.
+
+---
+
 ## **otaripper v3.5.0** (2026-10-01)
 
 ### Payload Safety Hardening, Remote Seek Bounds & UX Revamp
