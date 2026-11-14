@@ -4,6 +4,9 @@ use std::io::{self};
 
 pub(crate) const SIMD_THRESHOLD: usize = 4096;
 
+/// Copies at least this large use non-temporal (streaming) stores.
+pub(crate) const NT_THRESHOLD: usize = 1_048_576;
+
 /// Writes sequential data across multiple extents with SIMD acceleration.
 pub struct ExtentsWriter<'a, 'b> {
     extents: &'a mut [&'b mut [u8]],
@@ -46,7 +49,7 @@ impl<'a, 'b> ExtentsWriter<'a, 'b> {
         let dest_slice = &mut extent[self.off..self.off + to_copy];
         let src_slice = &data[..to_copy];
 
-        // Hot path first: large copies (>= 1KB) use SIMD — this is the common case
+        // Hot path first: large copies (>= SIMD_THRESHOLD) use SIMD — this is the common case
         if to_copy >= SIMD_THRESHOLD {
             simd_copy_large(self.simd, src_slice, dest_slice);
         } else {
@@ -161,14 +164,14 @@ pub(crate) fn simd_copy_large(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
 fn simd_copy_chunk(simd: CpuSimd, src: &[u8], dst: &mut [u8]) {
     match simd {
         CpuSimd::Avx512 => unsafe {
-            if src.len() >= 1_048_576 {
+            if src.len() >= NT_THRESHOLD {
                 simd_copy_avx512_stream(src, dst);
             } else {
                 simd_copy_avx512(src, dst);
             }
         },
         CpuSimd::Avx2 => unsafe {
-            if src.len() >= 1_048_576 {
+            if src.len() >= NT_THRESHOLD {
                 simd_copy_avx2_stream(src, dst);
             } else {
                 simd_copy_avx2(src, dst);
@@ -233,7 +236,7 @@ unsafe fn simd_copy_avx512(src: &[u8], dst: &mut [u8]) {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f")]
 unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
-    if src.len() < 1_048_576 {
+    if src.len() < NT_THRESHOLD {
         unsafe {
             return simd_copy_avx512(src, dst);
         }
@@ -241,10 +244,18 @@ unsafe fn simd_copy_avx512_stream(src: &[u8], dst: &mut [u8]) {
 
     let src_ptr = src.as_ptr();
     let dst_ptr = dst.as_mut_ptr();
-    let mut i = 0;
+
+    // vmovntdq faults on a destination that is not 64-byte aligned, so copy
+    // the unaligned head with a regular copy first.
+    let misalign = (dst_ptr as usize) & 63;
+    let head = if misalign == 0 { 0 } else { 64 - misalign };
+    if head > 0 {
+        dst[..head].copy_from_slice(&src[..head]);
+    }
 
     // Work in 64-byte blocks
-    let simd_end = src.len() & !63;
+    let mut i = head;
+    let simd_end = head + ((src.len() - head) & !63);
     while i < simd_end {
         unsafe {
             let data = _mm512_loadu_si512(src_ptr.add(i) as *const __m512i);
@@ -290,7 +301,7 @@ unsafe fn simd_copy_avx2(src: &[u8], dst: &mut [u8]) {
 #[target_feature(enable = "avx2")]
 #[inline]
 unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
-    if src.len() < 1_048_576 {
+    if src.len() < NT_THRESHOLD {
         unsafe {
             return simd_copy_avx2(src, dst);
         }
@@ -298,10 +309,18 @@ unsafe fn simd_copy_avx2_stream(src: &[u8], dst: &mut [u8]) {
 
     let src_ptr = src.as_ptr();
     let dst_ptr = dst.as_mut_ptr();
-    let mut i = 0;
+
+    // vmovntdq faults on a destination that is not 32-byte aligned, so copy
+    // the unaligned head with a regular copy first.
+    let misalign = (dst_ptr as usize) & 31;
+    let head = if misalign == 0 { 0 } else { 32 - misalign };
+    if head > 0 {
+        dst[..head].copy_from_slice(&src[..head]);
+    }
 
     // Work in 32-byte blocks
-    let simd_end = src.len() & !31;
+    let mut i = head;
+    let simd_end = head + ((src.len() - head) & !31);
     while i < simd_end {
         unsafe {
             let data = _mm256_loadu_si256(src_ptr.add(i) as *const __m256i);
@@ -405,4 +424,36 @@ unsafe fn is_all_zero_sse2(data: &[u8]) -> bool {
         }
     }
     data[i..].iter().all(|&b| b == 0)
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod tests {
+    use super::*;
+
+    /// Non-temporal stores (`vmovntdq`) fault on unaligned destinations.
+    /// Decompressors return short reads, so `ExtentsWriter` can land a full
+    /// 1 MiB write at any offset inside an extent. Sweep all 64 alignments
+    /// for every SIMD level this CPU supports.
+    #[test]
+    fn large_copy_handles_any_dst_alignment() {
+        let mut levels = vec![CpuSimd::None, CpuSimd::Sse2];
+        if is_x86_feature_detected!("avx2") {
+            levels.push(CpuSimd::Avx2);
+        }
+        if is_x86_feature_detected!("avx512f") && is_x86_feature_detected!("avx512bw") {
+            levels.push(CpuSimd::Avx512);
+        }
+
+        let len = NT_THRESHOLD + 37;
+        let src: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let mut backing = vec![0u8; len + 64];
+        for simd in levels {
+            for misalign in 0..64 {
+                backing.fill(0);
+                let dst = &mut backing[misalign..misalign + len];
+                simd_copy_large(simd, &src, dst);
+                assert!(dst == &src[..], "{simd:?}: copy mismatch at misalign {misalign}");
+            }
+        }
+    }
 }
