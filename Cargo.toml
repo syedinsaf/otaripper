@@ -1,8 +1,8 @@
 [package]
 name = "otaripper"
-version = "3.5.0"
+version = "3.6.0"
 edition = "2024"
-rust-version = "1.98.1"
+rust-version = "1.100"
 authors = ["Syed Insaf <syedinsaf@proton.me>"]
 description = "Ultra-fast partition extractor for Android OTA .zip and payload.bin files (Local & HTTP URL Streaming)"
 repository = "https://github.com/syedinsaf/otaripper"
@@ -31,14 +31,14 @@ hex = "0.4.3"
 indicatif = "0.18.6"
 memmap2 = { version = "0.9.11", features = ["stable_deref_trait"] }
 mimalloc = "0.1.52"
-prost = "0.14.4"
+prost = "0.14.6"
 rayon = "1.12.0"
 ring = "0.17.14"
-sysinfo = "0.40.0"
+sysinfo = "0.40.3"
 tempfile = "3.27.0"
 liblzma = "0.4.8"
-zstd = "0.14.0"
-zip = { version = "9.0.0", default-features = false, features = [
+zstd = "0.14.4"
+zip = { version = "9.5.1", default-features = false, features = [
   "deflate",
   "bzip2",
   "zstd",
@@ -63,3 +63,4 @@ debug = false
 panic = "abort"
 overflow-checks = true
 incremental = false
+
