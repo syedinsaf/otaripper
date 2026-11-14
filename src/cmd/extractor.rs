@@ -1497,12 +1497,15 @@ impl<'a> Extractor<'a> {
 
                 let payload_size = zipfile.size();
 
-                // LIGHTWEIGHT RAM CHECK: Only refresh memory stats to minimize overhead
-                let mut sys = System::new_with_specifics(
+                // LIGHTWEIGHT RAM CHECK: the constructor already refreshes RAM only.
+                // sysinfo 0.40 returns a Result; if memory stats are unavailable
+                // (minimal container, no /proc), assume 0 so we take the safe
+                // temp-file path instead of failing the extraction.
+                let available_ram = System::new_with_specifics(
                     RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
-                );
-                sys.refresh_memory();
-                let available_ram = sys.available_memory();
+                )
+                .map(|sys| sys.available_memory())
+                .unwrap_or(0);
 
                 // HEURISTIC: Use temp file if payload > 50% available RAM to avoid OOM or Swap lag
                 if payload_size > available_ram / 2 {
