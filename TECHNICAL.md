@@ -2,8 +2,8 @@
 
 This document provides detailed technical information about **otaripper’s** architecture, design decisions, and implementation details.
 
-> **v3.5.0 Note:**
-> This release introduces payload safety hardening, arithmetic overflow protection (`checked_add`), hardened remote HTTP stream offset bounds checking, updated MSRV (Rust 1.98.1), dependency refreshes, and a completely revamped CLI help interface with color-coded syntax highlighting and structured layout.
+> **v3.6.0 Note:**
+> This release introduces SIMD non-temporal memory alignment fault protection (`vmovntdq` head misalignment handling for AVX2 and AVX-512), hardened available RAM querying with fallback to disk extraction for constrained/containerized environments, Cargo 1.100 supply-chain cooldown protection (`global-min-publish-age = "3 days"`), native unused-dependency lint tracking (`[lints.cargo]`), updated MSRV (Rust 1.100), dependency updates (`sysinfo 0.40.3`, `zip 9.5.1`, `prost 0.14.6`, `zstd 0.14.4`), and overhauled, robust `build.sh` and `build.ps1` native build scripts.
 
 ---
 
@@ -66,6 +66,12 @@ Prior to v2.3, extracting partitions from a `.zip` file required unpacking the `
 otaripper now inspects the zip file metadata. If the payload uses the `STORED` compression method (which almost all Android OTA zips do), it safely bypasses the temporary file entirely. Instead, it memory-maps the *entire* `.zip` file directly from the disk and provides the internal parser with a sliced view starting at the precise byte offset of `payload.bin`.
 
 This optimization yields a 2x reduction in overall SSD write cycles per extraction and eliminates startup delays.
+
+### RAM-Aware Disk Heuristic & Container Fallback (v3.6.0)
+
+When extracting compressed `payload.bin` archives from `.zip` files, otaripper performs a lightweight RAM check (`sysinfo::System::new_with_specifics` refreshing physical RAM only) to determine whether the payload comfortably fits in memory. If the payload size exceeds 50% of available physical RAM, it automatically streams extraction directly to a localized temporary file on disk, avoiding OOM panics or system swap paging stalls.
+
+In **v3.6.0**, this check was hardened for constrained runtime environments: if available memory cannot be queried (such as minimal Docker containers or chroot environments lacking a mounted `/proc` filesystem), the query safely falls back (`available_ram = 0`), guaranteeing that extraction defaults to the safe disk path rather than aborting execution.
 
 ### File Memory Mapping
 
@@ -197,6 +203,28 @@ This value is chosen because:
 For smaller writes, cached stores are faster due to lower latency.
 
 This heuristic is intentionally conservative and tuned for real OTA workloads.
+
+---
+
+### Non-Temporal Store Alignment Protection (v3.6.0)
+
+Vectorized non-temporal streaming stores (`_mm256_stream_si256` / `_mm512_stream_si512` mapping to `vmovntdq`) enforce strict destination pointer alignment: **32 bytes** on AVX2 and **64 bytes** on AVX-512. Issuing these instructions against unaligned addresses causes an immediate CPU hardware General Protection Fault (`SIGSEGV` / hardware crash).
+
+Because arbitrary decompressed operations can start or end on unaligned byte offsets within an extent, `ExtentsWriter` explicitly calculates the destination misalignment head:
+
+```rust
+let misalign = (dst_ptr as usize) & 31; // & 63 for AVX-512
+let head = if misalign == 0 { 0 } else { 32 - misalign };
+if head > 0 {
+    dst[..head].copy_from_slice(&src[..head]);
+}
+```
+
+1. The unaligned head is written with safe, scalar copies up to the vector alignment boundary.
+2. The remaining block-aligned body runs at maximum memory bandwidth using `vmovntdq`.
+3. Any trailing remainder (< 32 or 64 bytes) is completed with a scalar copy.
+
+This guarantees zero risk of alignment faults regardless of extent offset or partition chunk sizes, backed by test suite validation (`large_copy_handles_any_dst_alignment`) testing all 64 possible misalignment permutations.
 
 ---
 
