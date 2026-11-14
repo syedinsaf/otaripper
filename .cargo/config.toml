@@ -43,6 +43,13 @@ rustflags = ["-C", "target-cpu=x86-64-v2", "-C", "target-feature=+crt-static"]
 # CC_aarch64_linux_android = "/path/to/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
 # AR_aarch64_linux_android = "/path/to/android-ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar"
 
+# Dependency cooldown (Cargo 1.100+): the resolver skips crate versions published
+# less than 3 days ago, so a malicious release is likely caught before you pick it up.
+# Older Cargo ignores this key. Override once with:
+#   CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update <crate> --precise <ver>
+[registry]
+global-min-publish-age = "3 days"
+
 [alias]
 lite = "build --release --no-default-features --target-dir target/lite"
 full = "build --release"
