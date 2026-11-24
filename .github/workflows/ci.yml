@@ -11,23 +11,30 @@ permissions:
   contents: read
 
 env:
+  BIN_NAME: otaripper
   CARGO_TERM_COLOR: always
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  test-and-build:
+# =========================
+# Linux Matrix
+# =========================
+  linux:
     name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: Linux (x86_64)
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - name: Windows (x86_64)
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - target: x86_64-unknown-linux-gnu
+            name: Linux (GNU x86_64)
+            test: true
+          - target: x86_64-unknown-linux-musl
+            name: Linux (musl static x86_64)
+            test: false
+          - target: aarch64-unknown-linux-gnu
+            name: Linux (ARM64)
+            test: false
 
     steps:
       - name: Checkout repository
@@ -43,10 +50,31 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Run Cargo Check
-        run: cargo check --all-targets --target ${{ matrix.target }}
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          if [ "${{ matrix.target }}" = "x86_64-unknown-linux-musl" ]; then
+            sudo apt-get install -y musl-tools
+          fi
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
+
+      - name: Configure ARM64 toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+
+          [env]
+          CC_aarch64_unknown_linux_gnu="aarch64-linux-gnu-gcc"
+          AR_aarch64_unknown_linux_gnu="aarch64-linux-gnu-ar"
+          EOF
 
       - name: Run Unit Tests
+        if: matrix.test == true
         run: cargo test --target ${{ matrix.target }}
 
       - name: Build Full Binary (Release)
@@ -59,11 +87,167 @@ jobs:
         if: failure() && github.actor == 'dependabot[bot]'
         shell: bash
         run: |
-          echo "### ⚠️ Dependabot Build Failed" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Dependabot Build Failed on ${{ matrix.name }}" >> $GITHUB_STEP_SUMMARY
           echo "One of the updated crates in this PR failed to compile or pass tests." >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "👉 **To drop a broken crate and keep the working ones, comment on the PR:**" >> $GITHUB_STEP_SUMMARY
           echo '```text' >> $GITHUB_STEP_SUMMARY
           echo "@dependabot ignore <crate_name>" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "Dependabot will immediately recreate the PR excluding that crate." >> $GITHUB_STEP_SUMMARY
+
+# =========================
+# Android (ARM64)
+# =========================
+  android:
+    name: Android (ARM64)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-linux-android
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r26d
+        id: ndk
+
+      - name: Build Full Android (Release)
+        run: |
+          TOOLCHAIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android24-clang"
+
+          cargo build --release --target aarch64-linux-android
+
+      - name: Build Lite Android (Release, no default features)
+        run: |
+          TOOLCHAIN="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export CC_aarch64_linux_android="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export AR_aarch64_linux_android="$TOOLCHAIN/llvm-ar"
+          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$TOOLCHAIN/aarch64-linux-android24-clang"
+
+          cargo build --release --target aarch64-linux-android --no-default-features
+
+      - name: Dependabot PR Failure Hint
+        if: failure() && github.actor == 'dependabot[bot]'
+        shell: bash
+        run: |
+          echo "### ⚠️ Dependabot Build Failed on Android (ARM64)" >> $GITHUB_STEP_SUMMARY
+          echo "One of the updated crates in this PR failed to compile for Android." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "👉 **To drop a broken crate and keep the working ones, comment on the PR:**" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "@dependabot ignore <crate_name>" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+# =========================
+# Windows Matrix
+# =========================
+  windows:
+    name: ${{ matrix.name }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            name: Windows (MSVC x86_64)
+            test: true
+          - target: x86_64-pc-windows-gnu
+            name: Windows (GNU x86_64)
+            test: false
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Run Unit Tests
+        if: matrix.test == true
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Build Full Binary (Release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Lite Binary (Release, no default features)
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features
+
+      - name: Dependabot PR Failure Hint
+        if: failure() && github.actor == 'dependabot[bot]'
+        shell: bash
+        run: |
+          echo "### ⚠️ Dependabot Build Failed on ${{ matrix.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "One of the updated crates in this PR failed to compile or pass tests." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "👉 **To drop a broken crate and keep the working ones, comment on the PR:**" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "@dependabot ignore <crate_name>" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+# =========================
+# macOS Matrix
+# =========================
+  macos:
+    name: ${{ matrix.name }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            name: macOS (Intel x86_64)
+          - target: aarch64-apple-darwin
+            name: macOS (Apple Silicon ARM64)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build Full Binary (Release)
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Lite Binary (Release, no default features)
+        run: cargo build --release --target ${{ matrix.target }} --no-default-features
+
+      - name: Dependabot PR Failure Hint
+        if: failure() && github.actor == 'dependabot[bot]'
+        shell: bash
+        run: |
+          echo "### ⚠️ Dependabot Build Failed on ${{ matrix.name }}" >> $GITHUB_STEP_SUMMARY
+          echo "One of the updated crates in this PR failed to compile." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "👉 **To drop a broken crate and keep the working ones, comment on the PR:**" >> $GITHUB_STEP_SUMMARY
+          echo '```text' >> $GITHUB_STEP_SUMMARY
+          echo "@dependabot ignore <crate_name>" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
