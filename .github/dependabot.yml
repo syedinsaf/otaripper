@@ -4,10 +4,14 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    # Group patch updates together into a single safe PR
+    # Minor and major updates will each get their own separate PR
     groups:
-      rust-dependencies:
+      rust-patch-dependencies:
         patterns:
           - "*"
+        update-types:
+          - "patch"
     ignore:
       - dependency-name: "reqwest"
         versions: [">= 0.13.0"]
